@@ -36,8 +36,8 @@ def run(operation, parameters, timeout):
                 json.dumps(parameters).encode("utf-8"), timeout=remaining)
         except subprocess.TimeoutExpired:
             return {"state": "timeout"}
-        if time.monotonic() >= deadline:
-            return {"state": "timeout"}
+        # communicate 在时限内返回即子进程已完整结束：采用其结果。若再按时钟判超时，
+        # 会把已确认的签到成功记成“不确定”，或把已被接受的推送当成失败去重试。
         if process.returncode != 0:
             return {"state": "failed"}
         reply = json.loads(stdout)
