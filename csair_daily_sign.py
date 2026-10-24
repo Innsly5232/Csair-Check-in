@@ -15,7 +15,10 @@ GitHub 使用 CSAIR_COOKIE_159 / 157 / 185 / 183，后缀即账号标识；无�
 代码内不再保存 Cookie（已移除 CONFIG_COOKIES）；空文件不会回退到其他来源。
 接口、请求体和客户端标识沿用原版，未独立验证当前接口业务协议。
 仅明确的签到成功/已签到文字被视为完成；通用 success 不作为签到成功。
-仅建连超时自动重试，读超时/断连/5xx 均视为结果不确定，不自动重发 POST。
+仅请求体肯定未发出的情况自动重试：建连超时，以及连接建立前失败（DNS 解析失败、连接被拒绝，
+凭异常链中的 urllib3 类名识别）。读超时、连接后断开、5xx 均视为结果不确定，不自动重发 POST。
+单账号读取响应另有总时长上限，在后台线程中读取、主线程限时等待，服务端逐字节阻塞导致单次
+读超时不触发时也能主动中断并关闭连接；超时按结果不确定处理，不重发。
 无状态查询、自动登录、积分查询、定时调度或验证码处理功能。
 日志仅保留固定诊断，不输出 Cookie、原始服务器消息、响应体或异常文本。
 真实运行结束后发送全部账号结果，成功/已签到也通知；仅检查不推送。
@@ -42,6 +45,7 @@ from pathlib import Path
 import random
 import re
 import sys
+import threading
 import time
 
 import pushplus
@@ -53,6 +57,7 @@ LOG_FILE = BASE_DIR / "sign_log.txt"
 ACCOUNT_IDS = ("159", "157", "185", "183")
 SLEEP_MIN, SLEEP_MAX = 3, 8
 MAX_RETRY = 2
+ACCOUNT_TIME_BUDGET = 30  # 单账号读取响应的额外时长上限（秒），叠加在连接/读超时之上
 CHINA_TZ = dt.timezone(dt.timedelta(hours=8))
 MAX_RESPONSE_BYTES = 1024 * 1024
 SIGN_URL = "https://wxapi.csair.com/marketing-tools/activity/join?type=APPTYPE&chanel=ss&lang=zh"
@@ -198,56 +203,146 @@ def classify_response(data):
     return Result("未知结果", "缺少明确的签到结果；请在南航 App 核对，未记录响应原文")
 
 
+def connection_never_sent(exc):
+    """判断异常是否发生在连接建立之前（请求体肯定未发出，可安全重试）。
+
+    仅凭异常链中的 urllib3 类名判断：NewConnectionError（含 DNS 解析失败、连接被拒绝）、
+    NameResolutionError、ConnectTimeoutError 都在连接建立前失败。连接后断开（ProtocolError、
+    RemoteDisconnected 等）无法确认请求体是否已发出，一律返回 False，不重试。
+    """
+    safe = {"NewConnectionError", "NameResolutionError", "ConnectTimeoutError"}
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if type(current).__name__ in safe:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+class _ReadOutcome:
+    """read_body_within 的结果：body 读满、超大、读取异常，或超时未完成之一。"""
+    __slots__ = ("body", "oversize", "error", "timed_out")
+
+    def __init__(self):
+        self.body = None
+        self.oversize = False
+        self.error = None
+        self.timed_out = False
+
+
+def read_body_within(response, max_bytes, timeout):
+    """在后台线程中有界读取响应体，主线程最多等待 timeout 秒。
+
+    若超时仍未读完立即返回 timed_out，不等待读取线程，因此服务端逐字节阻塞时总时长上限仍成立。
+    本函数不负责关闭响应——关闭一律由调用方异步进行（见 close_async），避免 requests 的 close
+    排空响应体时阻塞主线程。读取线程为守护线程，不阻塞进程退出。
+    """
+    outcome = _ReadOutcome()
+
+    def worker():
+        body = bytearray()
+        try:
+            for chunk in response.iter_content(chunk_size=8192):
+                body.extend(chunk)
+                if len(body) > max_bytes:
+                    outcome.oversize = True
+                    return
+            outcome.body = bytes(body)
+        except Exception as exc:  # 读超时、断连等；回传由调用方按“结果不确定”归类
+            outcome.error = exc
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    thread.join(timeout if timeout and timeout > 0 else 0)
+    outcome.timed_out = thread.is_alive()
+    return outcome
+
+
+def close_async(response):
+    """在守护线程中关闭响应。requests 的 close 可能排空响应体而阻塞，绝不能在主线程同步调用。
+
+    主线程所有返回路径都经此异步关闭（而非 `with ... as response` 的同步 __exit__），
+    即使响应体仍在逐字节阻塞，主线程也能立即返回。残留连接随签到进程退出回收，账号数量有限不累积。
+    """
+    if response is None:
+        return
+
+    def worker():
+        try:
+            response.close()
+        except Exception:
+            pass
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
 def sign_one(cookie, requests_module, connect_timeout=10, read_timeout=20,
              retries=MAX_RETRY, ignore_proxy=False, sleep=time.sleep):
-    """各账号独立 Session；自动重试仅限 requests 明确可安全重试的 ConnectTimeout。"""
+    """各账号独立 Session；自动重试仅限请求体肯定未发出的情况（ConnectTimeout 及连接建立前失败）。"""
     req = requests_module
     with req.Session() as session:
         if ignore_proxy:
             session.trust_env = False
             session.proxies.clear()
         headers = dict(HEADERS, Cookie=cookie)
+        deadline = time.monotonic() + max(connect_timeout, 0) + max(read_timeout, 0) + ACCOUNT_TIME_BUDGET
         for attempt in range(1, retries + 2):
+            response = None
             try:
-                with session.post(SIGN_URL, headers=headers, json=SIGN_BODY,
-                                  timeout=(connect_timeout, read_timeout),
-                                  allow_redirects=False, stream=True) as response:
-                    code = response.status_code
-                    if code == 401:
-                        return Result("Cookie 失效", "HTTP 401：请更新 Cookie", attempt)
-                    if code == 403:
-                        return Result("访问被拒绝", "HTTP 403：可能是权限或风控问题，停止重试", attempt)
-                    if code == 429:
-                        return Result("请求受限", "HTTP 429：请求过于频繁，本次不再提交", attempt)
-                    if 300 <= code < 400:
-                        return Result("请求失败", "接口发生重定向，已阻止跟随；请核对接口或登录状态", attempt)
-                    if code >= 500:
-                        return Result("结果不确定", f"HTTP {code}：服务端异常，请在 App 核对", attempt)
-                    if not 200 <= code < 300:
-                        return Result("请求失败", f"HTTP {code}：请求未成功", attempt)
-                    # 有界读取，避免错误页面或异常响应无限占用内存。
-                    body = bytearray()
-                    for chunk in response.iter_content(chunk_size=8192):
-                        body.extend(chunk)
-                        if len(body) > MAX_RESPONSE_BYTES:
-                            return Result("结果不确定", "响应超过 1 MiB，停止读取，请在 App 核对", attempt)
-                    import json
-                    try:
-                        data = json.loads(bytes(body))
-                    except (ValueError, UnicodeError, RecursionError):
-                        return Result("结果不确定", "返回非有效 JSON，请在 App 核对是否已签到", attempt)
-                    result = classify_response(data)
-                    return Result(result.status, result.detail, attempt)
-            except req.exceptions.ConnectTimeout:
-                if attempt > retries:
-                    return Result("请求失败", "连接超时，已达到重试上限", attempt)
-                sleep(min(2 ** attempt, 20) + random.uniform(0, 1))
+                # 不使用 with ... as response：其 __exit__ 会在主线程同步 close 并排空响应体，
+                # 当读取超时、响应体仍在阻塞时会拖住主线程。改为手动持有、在 finally 中异步关闭。
+                response = session.post(SIGN_URL, headers=headers, json=SIGN_BODY,
+                                        timeout=(connect_timeout, read_timeout),
+                                        allow_redirects=False, stream=True)
+                code = response.status_code
+                if code == 401:
+                    return Result("Cookie 失效", "HTTP 401：请更新 Cookie", attempt)
+                if code == 403:
+                    return Result("访问被拒绝", "HTTP 403：可能是权限或风控问题，停止重试", attempt)
+                if code == 429:
+                    return Result("请求受限", "HTTP 429：请求过于频繁，本次不再提交", attempt)
+                if 300 <= code < 400:
+                    return Result("请求失败", "接口发生重定向，已阻止跟随；请核对接口或登录状态", attempt)
+                if code >= 500:
+                    return Result("结果不确定", f"HTTP {code}：服务端异常，请在 App 核对", attempt)
+                if not 200 <= code < 300:
+                    return Result("请求失败", f"HTTP {code}：请求未成功", attempt)
+                # 有界读取，避免错误页面或异常响应无限占用内存；并在后台线程中限制总读取
+                # 时长，服务端逐字节阻塞（单次 read 超时不触发）时也能主动中断。
+                outcome = read_body_within(response, MAX_RESPONSE_BYTES, deadline - time.monotonic())
+                if outcome.timed_out:
+                    return Result("结果不确定", "读取响应超过时间上限，可能已提交；请在 App 核对，本次不重发", attempt)
+                if outcome.oversize:
+                    return Result("结果不确定", "响应超过 1 MiB，停止读取，请在 App 核对", attempt)
+                if outcome.error is not None:
+                    # 读取阶段的异常：请求体已发出，无法确认是否已提交，不重发。
+                    return Result("结果不确定",
+                                  f"读取响应时网络异常（{type(outcome.error).__name__}），可能已提交；请在 App 核对，本次不重发", attempt)
+                try:
+                    data = json.loads(outcome.body)
+                except (ValueError, UnicodeError, RecursionError):
+                    return Result("结果不确定", "返回非有效 JSON，请在 App 核对是否已签到", attempt)
+                result = classify_response(data)
+                return Result(result.status, result.detail, attempt)
             except req.exceptions.SSLError:
                 return Result("请求失败", "TLS 证书验证失败；未关闭证书验证", attempt)
             except req.exceptions.InvalidHeader:
                 return Result("配置错误", "Cookie 或请求头格式无效", attempt)
-            except req.exceptions.RequestException:
-                return Result("结果不确定", "读取超时或网络异常，可能已提交；请在 App 核对，本次不重发", attempt)
+            except req.exceptions.RequestException as exc:
+                # ConnectTimeout 及连接建立前的失败（DNS、连接被拒绝）请求体肯定未发出，可重试；
+                # 其余（读超时、连接后断开等）无法确认是否已提交，一律不重发。
+                retryable = isinstance(exc, req.exceptions.ConnectTimeout) or connection_never_sent(exc)
+                if not retryable:
+                    return Result("结果不确定", "读取超时或网络异常，可能已提交；请在 App 核对，本次不重发", attempt)
+                if attempt > retries or time.monotonic() > deadline:
+                    return Result("请求失败",
+                                  f"{type(exc).__name__}：连接未建立（请求未发出），已达到重试上限", attempt)
+                sleep(min(2 ** attempt, 20) + random.uniform(0, 1))
+            finally:
+                # 所有路径都异步关闭本次响应，绝不在主线程同步 close（可能排空响应体而阻塞）。
+                close_async(response)
 
 
 @contextmanager
@@ -366,8 +461,10 @@ def run_accounts(args, failures, notices):
                 try:
                     result = sign_one(account.cookie, requests, args.connect_timeout, args.read_timeout,
                                       args.retries, args.no_proxy)
-                except Exception:
-                    result = Result("结果不确定", "账号处理出现未预期错误，可能已提交；请在 App 核对，本次不重发")
+                except Exception as exc:
+                    # 只记异常类名用于排查，不记异常内容（可能含 Cookie 或响应原文）。
+                    result = Result("结果不确定",
+                                    f"账号处理出现未预期错误（{type(exc).__name__}），可能已提交；请在 App 核对，本次不重发")
                 notice = f"账号：{account.label}\n结果：{result.status}｜{result.detail}"
                 notices.append(notice)
                 if not result.ok:

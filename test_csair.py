@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch, Mock
 
@@ -88,6 +90,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(session.post.call_count, 3)
 
     def test_no_retry_ambiguous(self):
+        # 裸 ConnectionError（无 urllib3 连接前原因）无法确认请求体是否已发出，不重试。
         for exc in (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError,
                     requests.exceptions.ChunkedEncodingError):
             with self.subTest(exc=exc):
@@ -95,6 +98,73 @@ class Tests(unittest.TestCase):
                 self.assertEqual(result.status, '结果不确定')
                 self.assertEqual(session.post.call_count, 1)
                 self.assertNotIn('secret', result.detail)
+
+    def _connection_error_caused_by(self, name):
+        # 构造异常链：ConnectionError 的 __cause__ 是名为 name 的 urllib3 风格异常。
+        cause = type(name, (Exception,), {})('boom')
+        exc = requests.exceptions.ConnectionError('wrapped')
+        exc.__cause__ = cause
+        return exc
+
+    def test_connection_before_send_is_retried(self):
+        # DNS 解析失败、连接被拒绝、建连超时：请求体未发出，应重试后成功。
+        for name in ('NewConnectionError', 'NameResolutionError', 'ConnectTimeoutError'):
+            with self.subTest(name=name):
+                result, session = self.invoke([self._connection_error_caused_by(name),
+                                               Response(data={'message': '签到成功'})])
+                self.assertTrue(result.ok)
+                self.assertEqual(result.attempts, 2)
+        # 达到重试上限后给出明确诊断，且只含异常类名、不含内容。
+        result, session = self.invoke([self._connection_error_caused_by('NewConnectionError')] * 3)
+        self.assertEqual((result.status, session.post.call_count), ('请求失败', 3))
+        self.assertIn('ConnectionError', result.detail)
+        self.assertNotIn('boom', result.detail)
+
+    def test_connection_after_send_not_retried(self):
+        # 连接建立后断开（ProtocolError / RemoteDisconnected）无法确认是否已提交，不重试。
+        for name in ('ProtocolError', 'RemoteDisconnected'):
+            with self.subTest(name=name):
+                result, session = self.invoke([self._connection_error_caused_by(name)])
+                self.assertEqual((result.status, session.post.call_count), ('结果不确定', 1))
+
+    def test_slow_body_hits_time_budget(self):
+        # 真实阻塞复现：服务端在 next() 中逐块阻塞，单次 read 不超时，迭代器也不主动结束。
+        # 后台线程读取 + 主线程限时等待，应在预算内主动中断、关闭响应、且不重发 POST。
+        import time as _time
+        closed = threading.Event()
+        class Blocking(Response):
+            def __init__(self):
+                super().__init__(data={})
+            def close(self):
+                # 模拟 requests 的 close 会排空响应体而阻塞；必须在主线程路径之外执行。
+                _time.sleep(0.6)
+                closed.set()
+            def iter_content(self, **kw):
+                for _ in range(50):
+                    _time.sleep(0.05)  # 阻塞发生在 next() 内部，检查无法在循环体执行
+                    yield b'x'
+        start = _time.monotonic()
+        with patch.object(m, 'ACCOUNT_TIME_BUDGET', 0.2):
+            result, session = self.invoke([Blocking()], connect_timeout=0.01, read_timeout=0.01)
+        elapsed = _time.monotonic() - start
+        self.assertEqual(result.status, '结果不确定')
+        self.assertIn('时间上限', result.detail)
+        self.assertEqual(session.post.call_count, 1)
+        # 关键：close() 阻塞 0.6s，但主线程不等它，应在预算附近就返回。
+        self.assertLess(elapsed, 0.5)
+        # close() 确实在后台异步执行（打断连接），只是不在主线程热路径上。
+        self.assertTrue(closed.wait(2.0))
+
+    def test_read_error_is_uncertain_not_retried(self):
+        # 读取响应体阶段抛异常（请求体已发出）：归为结果不确定，不重发，诊断只含类名。
+        class Broken(Response):
+            def iter_content(self, **kw):
+                raise requests.exceptions.ChunkedEncodingError('sid=secret')
+                yield b''  # pragma: no cover
+        result, session = self.invoke([Broken(data={})])
+        self.assertEqual((result.status, session.post.call_count), ('结果不确定', 1))
+        self.assertIn('ChunkedEncodingError', result.detail)
+        self.assertNotIn('secret', result.detail)
 
     def test_bad_json_and_size(self):
         for raw in (b'<html>secret</html>', b'\xff', b'x'*(m.MAX_RESPONSE_BYTES+1)):
@@ -123,6 +193,70 @@ class Tests(unittest.TestCase):
             for bad in ('not-a-cookie', '=abc', 'sid=中文', 'sid=abc\x00'):
                 p.write_text(bad)
                 with self.assertRaises(ValueError): m.load_cookies(p)
+
+    def test_read_body_within_aborts_real_slow_socket(self):
+        # 真实回归：真实 requests + 真实慢速 HTTP 服务 + 完整 sign_one + 清理线程延迟。
+        # 服务端发送头后逐字节滴送、永不结束。即使响应清理（close）被延迟或阻塞，完整 sign_one
+        # 也必须在预算附近返回，不被 with/__exit__ 或 finally 的同步 close 拖住；且不重发 POST。
+        try:
+            import requests as real_requests
+        except ImportError:
+            self.skipTest('需要真实 requests；本地桩环境跳过，CI 覆盖')
+        if not hasattr(real_requests, 'get'):
+            self.skipTest('检测到最小桩 requests（无 get），跳过真实 socket 测试；CI 覆盖')
+        import socket as _socket
+
+        srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        srv.bind(('127.0.0.1', 0)); srv.listen(1)
+        port = srv.getsockname()[1]
+        stop = threading.Event()
+        hits = []
+
+        def server():
+            while not stop.is_set():
+                try:
+                    conn, _ = srv.accept()
+                except OSError:
+                    return
+                hits.append(1)  # 记录请求次数，验证不重发
+                try:
+                    conn.recv(65536)
+                    conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n')
+                    while not stop.is_set():
+                        conn.sendall(b'x')      # 滴送：永不发完 100000 字节
+                        stop.wait(0.2)
+                except OSError:
+                    pass
+                finally:
+                    conn.close()
+
+        threading.Thread(target=server, daemon=True).start()
+        self.addCleanup(lambda: (stop.set(), srv.close()))
+
+        # 模拟清理线程被延迟调度：真正的 close 推迟 0.1s 再在后台执行，
+        # 以证明主线程返回不依赖后台 close 的时机。
+        real_close_async = m.close_async
+        def delayed_close_async(response):
+            threading.Timer(0.1, real_close_async, args=(response,)).start()
+
+        # deadline = connect_timeout + read_timeout + ACCOUNT_TIME_BUDGET，这里约 2.2s。
+        connect_timeout = read_timeout = 1.0
+        budget = 0.2
+        deadline_est = connect_timeout + read_timeout + budget
+        start = time.monotonic()
+        with patch.object(m, 'SIGN_URL', f'http://127.0.0.1:{port}/'), \
+             patch.object(m, 'ACCOUNT_TIME_BUDGET', budget), \
+             patch.object(m, 'close_async', side_effect=delayed_close_async):
+            result = m.sign_one('sid=x', real_requests, connect_timeout=connect_timeout,
+                                read_timeout=read_timeout, retries=0, sleep=lambda _: None)
+        elapsed = time.monotonic() - start
+        stop.set()
+        self.assertEqual(result.status, '结果不确定')
+        self.assertIn('时间上限', result.detail)
+        # 若主线程被 with/__exit__ 或 finally 的同步 close 拖住，会明显超过预算。
+        self.assertLess(elapsed, deadline_est + 0.6)
+        self.assertEqual(len(hits), 1)     # 只提交一次，未重发
 
     def test_lock_and_release(self):
         with tempfile.TemporaryDirectory() as d:
