@@ -1,76 +1,49 @@
-# 南航 GitHub Actions 自动签到
+# 南航自动签到 + PushPlus 失败通知
 
-由 GitHub 托管的 Linux 运行器执行，不需要在 Mac 安装、运行或保持开机。
-默认每天北京时间 08:17 执行一次；GitHub 调度可能延迟，不保证准点。
+仓库：https://github.com/Innsly5232/Csair-Check-in
 
-## 部署
+每天北京时间 08:17 由 GitHub Actions 执行，无需 Mac 开机。调度可能延迟。
 
-1. 已部署目标：[Innsly5232/Csair-Check-in](https://github.com/Innsly5232/Csair-Check-in)，使用 Python 3.12。
-2. 将本项目文件放在仓库默认分支根目录，必须包含 `.github/workflows/`。
-   只上传 ZIP 文件不会启用工作流。Mac Finder 可用 Command+Shift+. 显示隐藏目录。
-3. 在仓库 Settings → Secrets and variables → Actions → New repository secret 中添加：
-   - Name：`CSAIR_COOKIES`
-   - Secret：完整南航 Cookie；多个账号每行一个，不加 Python 引号或列表符号。
-   不要把 Cookie 提交到代码、Issue、README 或聊天中。
-4. 在 Actions → 南航每日签到 → Run workflow 手动运行一次。
-   勾选 `check_only` 只验证格式；取消勾选才会向南航提交签到。
-5. 在运行摘要查看逐账号结果。仅当所有账号明确成功或今日已签，真实签到运行才会通过。
-   “离线测试”通过和“仅检查”通过均不代表真实签到成功。
+## 设置账号
 
-## 维护
+打开仓库 Settings → Secrets and variables → Actions → New repository secret。
+每个账号只需一个独立 Secret，名称后面的数字就是日志和通知中的账号标识：
 
-- Cookie 过期后更新同名 Secret；此项目不自动登录或刷新 Cookie。
-- 提交代码只触发离线测试，不会触发真实签到。
-- 请求读取超时、断连或服务端异常会返回“结果不确定”，需先在 App 核对。
-- 同一仓库的签到工作流串行执行，不会取消正在提交的签到任务。
-- 日志只保留固定诊断和配置行号，原始响应与 Cookie 不写入日志。
-- GitHub 只读仓库权限；凭证只注入配置检查和签到步骤。
-- 私有仓库使用账号的 Actions 配额；请在 GitHub 账号中查看实际余量。
-- 公共仓库长期无活动可能自动停用定时工作流；不通过无意义提交维持活跃。
-- 南航是否接受 GitHub 云端网络、当前接口和返回消息，仍需首次真实运行验证。
-- 不提供积分查询或自动验证码处理。
-
-## 文件
-
-- `csair_daily_sign.py`：升级后的签到脚本。
-- `.github/workflows/csair-sign.yml`：定时及手动签到。
-- `.github/workflows/test.yml`：代码更新时的离线回归测试。
-- `test_csair.py`：12 组离线测试，不使用真实 Cookie、不连接南航。
-- `requirements.txt`：固定 Requests 版本。
-
-## 官方参考
-
-- https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows
-- https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions
-
-## 部署前检查结论
-
-- 原附件中的 12 组离线测试已通过；补齐了缺失的两个 Actions 工作流和 `.gitignore`。
-- 无账号密码自动登录或 Cookie 刷新功能；Cookie 失效需手动更新。
-- 成功判定基于接口文字消息；接口地址、请求体和业务返回仍须用真实账号验证。
-- 未配置 `CSAIR_COOKIES` 时工作流会明确报错，不会尝试签到。
-- 手动运行默认仅检查格式，真实签到需取消 `check_only`；每日定时运行执行真实签到。
-
-## PushPlus 失败通知与账号备注
-
-在仓库 Settings → Secrets and variables → Actions 中设置以下 Repository secrets；无需 Cookie 文件：
-
-| Secret 名称 | 内容 |
+| Secret 名称 | Secret 内容 |
 | --- | --- |
-| `CSAIR_COOKIES` | 每行一个完整 Cookie，不同账号各一行 |
-| `CSAIR_ACCOUNT_NAMES` | 可选，每行一个备注，如“本人”“家人”，与 Cookie 原始行号一一对应 |
-| `PUSHPLUS_TOKEN` | PushPlus 个人 Token，绑定接收微信后填写 |
+| `CSAIR_COOKIE_159` | 159 账号的完整 Cookie |
+| `CSAIR_COOKIE_157` | 157 账号的完整 Cookie |
+| `CSAIR_COOKIE_185` | 185 账号的完整 Cookie |
+| `CSAIR_COOKIE_193` | 193 账号的完整 Cookie |
+| `PUSHPLUS_TOKEN` | PushPlus 个人 Token，已绑定接收微信 |
 
-备注与 Cookie 的行数必须一致，包括空行和注释行；建议两处都不放空行和注释。备注最长 40 字，不填写 Cookie、Token 或个人敏感信息。未设置备注时使用“配置行 N”。重复 Cookie 仅签到一次，保留首次出现的备注和原始行号，后面的账号不会错位。
+每个 Cookie Secret 只填该账号的一条完整 Cookie，不填账号名、不加引号、不放多个账号。无需 Cookie 文件，也无需 `CSAIR_ACCOUNT_NAMES` 或 `CSAIR_COOKIES`；这两个旧 Secret 不再被 GitHub 工作流读取，可以删除。
 
-所有失败或无法确认成功的账号会合并发送一条 PushPlus 微信通知，含备注、原始配置行号、北京时间及固定原因说明。涵盖 Cookie 失效、403、429、网络错误、服务器错误、未知结果以及配置错误。不会把 Cookie、原始响应或异常文本发给 PushPlus。全部成功或今日已签时不通知；手动 `check_only` 模式不联网、不推送，即使格式错误也仅报告到 Actions。
+可以先配置部分账号；未设置或为空的账号会跳过，四个都为空则报错并尝试推送提醒。格式错误会指出对应数字并停止整批运行。相同 Cookie 只处理一次，按 159、157、185、193 顺序保留第一个标识。
 
-Cookie 格式错误会停止整批运行并通知配置行号，请修正后重试。推送失败不会让签到变为成功，也不会重发签到。通知请求不自动重试；PushPlus 返回接受只代表收到请求，不保证微信最终送达。未配置或填错 PUSHPLUS_TOKEN 时无法收到通知，需查看 Actions 日志。
+例如 157 账号失效，通知显示“账号：157；原因：Cookie 失效”，只需更新 `CSAIR_COOKIE_157`。
 
-签到前的安装/测试失败会尝试发送工作流失败提醒。GitHub 未启动任务、拉取代码失败、运行器中断或整个任务被强制终止时，脚本无法保证发出通知。网络断开也可能同时影响签到和推送。
+## 运行
 
-每次真实运行失败都会提醒；Cookie 持续失效时每天都会提醒，直到更新。当前没有钉钉或其他机器人通知。
+Actions → 南航每日签到 → Run workflow。默认勾选 `check_only`，只检查格式，不联网、不推送，也不验证 Cookie 有效期。取消勾选执行真实签到。每日定时任务执行真实签到。
 
-新增 `test_notifications.py` 覆盖账号对应、重复项、失败合并、成功静默、配置错误、通知接口异常和凭证脱敏。运行全部测试：`python -m unittest discover -v`。
+代码提交只运行离线测试，不提交签到。日志与运行摘要会显示各账号结果；只有全部明确成功或今日已签时真实签到运行才通过。
 
-PushPlus 接口参考：https://www.pushplus.plus/doc/guide/api.html
+## PushPlus 通知
+
+失败和结果不确定的账号合并为一条通知，包含账号数字、北京时间和固定原因说明。涵盖凭证失效、403、429、网络错误、服务器异常、未知响应及配置错误。成功或今日已签不推送，没有钉钉或其他机器人通知。
+
+不发送 Cookie、原始服务器响应或异常文本。PushPlus 请求独立发送，不携带南航 Cookie；不自动重试通知。通知失败不会改变签到失败状态，详细诊断可查 Actions。PushPlus 接受请求不代表微信最终送达；缺少或填错 Token、额度用尽或网络故障都会影响通知。
+
+签到前的安装/测试失败会尝试发送工作流提醒。GitHub 未启动任务、拉取代码失败、运行器中断、任务被强制终止时无法保证通知。每次真实运行失败都会提醒，直到修复；仅检查模式即使失败也不推送。
+
+## 限制与测试
+
+- 不自动登录或刷新 Cookie；过期后需更新对应 Secret。
+- 南航接口、请求体和业务响应仍需首次真实运行验证，离线测试通过不代表真实签到成功。
+- 仅建连超时自动重试；读超时、断连、5xx 等结果不确定时不重复提交，请先在 App 核对。
+- 工作流只读仓库权限，凭证只注入必要步骤，签到任务串行执行。
+- 使用 Python 3.12 和固定版本 Requests；运行测试：`python -m unittest discover -v`。
+- 脚本保留旧版本地文件/环境变量用法用于兼容，但当前 GitHub 工作流仅使用四个独立 Secret。
+
+PushPlus 接口文档：https://www.pushplus.plus/doc/guide/api.html

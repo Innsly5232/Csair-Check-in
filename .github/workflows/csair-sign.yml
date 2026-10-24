@@ -37,15 +37,19 @@ jobs:
       - name: 仅检查配置（不联网、不推送）
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.check_only }}
         env:
-          CSAIR_COOKIES: ${{ secrets.CSAIR_COOKIES }}
-          CSAIR_ACCOUNT_NAMES: ${{ secrets.CSAIR_ACCOUNT_NAMES }}
+          CSAIR_COOKIE_159: ${{ secrets.CSAIR_COOKIE_159 }}
+          CSAIR_COOKIE_157: ${{ secrets.CSAIR_COOKIE_157 }}
+          CSAIR_COOKIE_185: ${{ secrets.CSAIR_COOKIE_185 }}
+          CSAIR_COOKIE_193: ${{ secrets.CSAIR_COOKIE_193 }}
         run: python csair_daily_sign.py --check
       - name: 提交签到并通知失败
         id: sign
         if: ${{ github.event_name == 'schedule' || !inputs.check_only }}
         env:
-          CSAIR_COOKIES: ${{ secrets.CSAIR_COOKIES }}
-          CSAIR_ACCOUNT_NAMES: ${{ secrets.CSAIR_ACCOUNT_NAMES }}
+          CSAIR_COOKIE_159: ${{ secrets.CSAIR_COOKIE_159 }}
+          CSAIR_COOKIE_157: ${{ secrets.CSAIR_COOKIE_157 }}
+          CSAIR_COOKIE_185: ${{ secrets.CSAIR_COOKIE_185 }}
+          CSAIR_COOKIE_193: ${{ secrets.CSAIR_COOKIE_193 }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
         run: python csair_daily_sign.py
       - name: 签到前步骤失败提醒

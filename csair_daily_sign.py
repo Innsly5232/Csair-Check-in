@@ -7,7 +7,9 @@
 运行：python3 csair_daily_sign.py
 帮助：python3 csair_daily_sign.py --help
 
-cookies.txt：每行一个完整 Cookie，支持 Cookie: 前缀、UTF-8 BOM 和 # 注释。
+GitHub 使用 CSAIR_COOKIE_159 / 157 / 185 / 193，后缀即账号标识；无需备注配置。
+独立 Secret 存在时优先读取，空值跳过；全部为空报错，不回退旧配置。
+以下为本地旧版兼容方式。cookies.txt：每行一个完整 Cookie，支持 Cookie: 前缀、UTF-8 BOM 和 # 注释。
 优先级：显式 --cookies > CSAIR_COOKIES 环境变量（多行）> cookies.txt
         > CONFIG_COOKIES（仅当 cookies.txt 不存在）。空文件不会回退旧账号。
 接口、请求体和客户端标识沿用原版，未独立验证当前接口业务协议。
@@ -41,6 +43,7 @@ import time
 BASE_DIR = Path(__file__).resolve().parent
 COOKIE_FILE = BASE_DIR / "cookies.txt"
 LOG_FILE = BASE_DIR / "sign_log.txt"
+ACCOUNT_IDS = ("159", "157", "185", "193")
 CONFIG_COOKIES = []  # 兼容旧版；建议把凭证放在 cookies.txt
 SLEEP_MIN, SLEEP_MAX = 3, 8
 MAX_RETRY = 2
@@ -88,6 +91,26 @@ class AlreadyRunning(Exception):
 def load_cookies(path=COOKIE_FILE, explicit=False):
     """返回账号及精确重复条数；不输出凭证，也不重新排列 Cookie 字段。"""
     path = Path(path)
+    independent = not explicit and any(f"CSAIR_COOKIE_{key}" in os.environ for key in ACCOUNT_IDS)
+    if independent:
+        accounts, seen, duplicates = [], set(), 0
+        for key in ACCOUNT_IDS:
+            cookie = os.environ.get(f"CSAIR_COOKIE_{key}", "").strip().lstrip("\ufeff")
+            if not cookie:
+                continue
+            cookie = re.sub(r"^cookie\s*:\s*", "", cookie, flags=re.I)
+            parts = [part.strip() for part in cookie.split(";") if part.strip()]
+            if (not cookie or any(ord(c) < 32 or ord(c) > 126 for c in cookie)
+                    or not parts or any("=" not in part or not part.split("=", 1)[0].strip() for part in parts)):
+                raise ValueError(f"账号 {key}：CSAIR_COOKIE_{key} 格式错误，须填写单个账号的完整 Cookie")
+            if cookie in seen:
+                duplicates += 1
+                continue
+            seen.add(cookie)
+            accounts.append(Account(key, cookie))
+        if not accounts:
+            raise ValueError("未配置账号：请至少填写一个 CSAIR_COOKIE_159 / 157 / 185 / 193 Secret")
+        return accounts, duplicates
     if explicit:
         lines = path.read_text(encoding="utf-8-sig").splitlines()
     elif "CSAIR_COOKIES" in os.environ:
@@ -290,7 +313,7 @@ def notify_failures(failures):
         return False
     content = "时间：" + dt.datetime.now(CHINA_TZ).strftime("%Y-%m-%d %H:%M:%S +0800")
     content += "\n\n" + "\n\n".join(failures)
-    content += "\n\nCookie 失效请更新 CSAIR_COOKIES；结果不确定请先在南航 App 核对。"
+    content += "\n\nCookie 失效请更新对应账号的 CSAIR_COOKIE_数字 Secret；结果不确定请先在南航 App 核对。"
     payload = {"token": token, "title": "南航签到失败提醒", "content": content,
                "template": "txt", "channel": "wechat"}
     try:
