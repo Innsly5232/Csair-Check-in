@@ -236,8 +236,8 @@ def read_body_within(response, max_bytes, timeout):
     """在后台线程中有界读取响应体，主线程最多等待 timeout 秒。
 
     若超时仍未读完立即返回 timed_out，不等待读取线程，因此服务端逐字节阻塞时总时长上限仍成立。
-    关闭响应（打断底层 socket）在丢弃的守护线程中异步进行——requests 的 close 会排空响应体，
-    与阻塞的读取线程一起也会阻塞，绝不能放在主线程路径上。所有后台线程均为守护线程，不阻塞进程退出。
+    本函数不负责关闭响应——关闭一律由调用方异步进行（见 close_async），避免 requests 的 close
+    排空响应体时阻塞主线程。读取线程为守护线程，不阻塞进程退出。
     """
     outcome = _ReadOutcome()
 
@@ -256,21 +256,26 @@ def read_body_within(response, max_bytes, timeout):
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
     thread.join(timeout if timeout and timeout > 0 else 0)
-    if thread.is_alive():
-        outcome.timed_out = True
-        # 关键：不在主线程调用 response.close()。requests 的 close 会排空(drain)响应体，
-        # 当后台线程正阻塞读取时它也会一并阻塞，使总时长上限形同虚设。改为在丢弃的守护线程中
-        # 异步关闭（尽力打断底层 socket），主线程立即返回。残留的连接/线程随签到进程退出回收，
-        # 账号数量有限不会累积。
-        threading.Thread(target=_close_quietly, args=(response,), daemon=True).start()
+    outcome.timed_out = thread.is_alive()
     return outcome
 
 
-def _close_quietly(response):
-    try:
-        response.close()
-    except Exception:
-        pass
+def close_async(response):
+    """在守护线程中关闭响应。requests 的 close 可能排空响应体而阻塞，绝不能在主线程同步调用。
+
+    主线程所有返回路径都经此异步关闭（而非 `with ... as response` 的同步 __exit__），
+    即使响应体仍在逐字节阻塞，主线程也能立即返回。残留连接随签到进程退出回收，账号数量有限不累积。
+    """
+    if response is None:
+        return
+
+    def worker():
+        try:
+            response.close()
+        except Exception:
+            pass
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def sign_one(cookie, requests_module, connect_timeout=10, read_timeout=20,
@@ -284,40 +289,43 @@ def sign_one(cookie, requests_module, connect_timeout=10, read_timeout=20,
         headers = dict(HEADERS, Cookie=cookie)
         deadline = time.monotonic() + max(connect_timeout, 0) + max(read_timeout, 0) + ACCOUNT_TIME_BUDGET
         for attempt in range(1, retries + 2):
+            response = None
             try:
-                with session.post(SIGN_URL, headers=headers, json=SIGN_BODY,
-                                  timeout=(connect_timeout, read_timeout),
-                                  allow_redirects=False, stream=True) as response:
-                    code = response.status_code
-                    if code == 401:
-                        return Result("Cookie 失效", "HTTP 401：请更新 Cookie", attempt)
-                    if code == 403:
-                        return Result("访问被拒绝", "HTTP 403：可能是权限或风控问题，停止重试", attempt)
-                    if code == 429:
-                        return Result("请求受限", "HTTP 429：请求过于频繁，本次不再提交", attempt)
-                    if 300 <= code < 400:
-                        return Result("请求失败", "接口发生重定向，已阻止跟随；请核对接口或登录状态", attempt)
-                    if code >= 500:
-                        return Result("结果不确定", f"HTTP {code}：服务端异常，请在 App 核对", attempt)
-                    if not 200 <= code < 300:
-                        return Result("请求失败", f"HTTP {code}：请求未成功", attempt)
-                    # 有界读取，避免错误页面或异常响应无限占用内存；并在后台线程中限制总读取
-                    # 时长，服务端逐字节阻塞（单次 read 超时不触发）时也能主动中断。
-                    outcome = read_body_within(response, MAX_RESPONSE_BYTES, deadline - time.monotonic())
-                    if outcome.timed_out:
-                        return Result("结果不确定", "读取响应超过时间上限，可能已提交；请在 App 核对，本次不重发", attempt)
-                    if outcome.oversize:
-                        return Result("结果不确定", "响应超过 1 MiB，停止读取，请在 App 核对", attempt)
-                    if outcome.error is not None:
-                        # 读取阶段的异常：请求体已发出，无法确认是否已提交，不重发。
-                        return Result("结果不确定",
-                                      f"读取响应时网络异常（{type(outcome.error).__name__}），可能已提交；请在 App 核对，本次不重发", attempt)
-                    try:
-                        data = json.loads(outcome.body)
-                    except (ValueError, UnicodeError, RecursionError):
-                        return Result("结果不确定", "返回非有效 JSON，请在 App 核对是否已签到", attempt)
-                    result = classify_response(data)
-                    return Result(result.status, result.detail, attempt)
+                # 不使用 with ... as response：其 __exit__ 会在主线程同步 close 并排空响应体，
+                # 当读取超时、响应体仍在阻塞时会拖住主线程。改为手动持有、在 finally 中异步关闭。
+                response = session.post(SIGN_URL, headers=headers, json=SIGN_BODY,
+                                        timeout=(connect_timeout, read_timeout),
+                                        allow_redirects=False, stream=True)
+                code = response.status_code
+                if code == 401:
+                    return Result("Cookie 失效", "HTTP 401：请更新 Cookie", attempt)
+                if code == 403:
+                    return Result("访问被拒绝", "HTTP 403：可能是权限或风控问题，停止重试", attempt)
+                if code == 429:
+                    return Result("请求受限", "HTTP 429：请求过于频繁，本次不再提交", attempt)
+                if 300 <= code < 400:
+                    return Result("请求失败", "接口发生重定向，已阻止跟随；请核对接口或登录状态", attempt)
+                if code >= 500:
+                    return Result("结果不确定", f"HTTP {code}：服务端异常，请在 App 核对", attempt)
+                if not 200 <= code < 300:
+                    return Result("请求失败", f"HTTP {code}：请求未成功", attempt)
+                # 有界读取，避免错误页面或异常响应无限占用内存；并在后台线程中限制总读取
+                # 时长，服务端逐字节阻塞（单次 read 超时不触发）时也能主动中断。
+                outcome = read_body_within(response, MAX_RESPONSE_BYTES, deadline - time.monotonic())
+                if outcome.timed_out:
+                    return Result("结果不确定", "读取响应超过时间上限，可能已提交；请在 App 核对，本次不重发", attempt)
+                if outcome.oversize:
+                    return Result("结果不确定", "响应超过 1 MiB，停止读取，请在 App 核对", attempt)
+                if outcome.error is not None:
+                    # 读取阶段的异常：请求体已发出，无法确认是否已提交，不重发。
+                    return Result("结果不确定",
+                                  f"读取响应时网络异常（{type(outcome.error).__name__}），可能已提交；请在 App 核对，本次不重发", attempt)
+                try:
+                    data = json.loads(outcome.body)
+                except (ValueError, UnicodeError, RecursionError):
+                    return Result("结果不确定", "返回非有效 JSON，请在 App 核对是否已签到", attempt)
+                result = classify_response(data)
+                return Result(result.status, result.detail, attempt)
             except req.exceptions.SSLError:
                 return Result("请求失败", "TLS 证书验证失败；未关闭证书验证", attempt)
             except req.exceptions.InvalidHeader:
@@ -332,6 +340,9 @@ def sign_one(cookie, requests_module, connect_timeout=10, read_timeout=20,
                     return Result("请求失败",
                                   f"{type(exc).__name__}：连接未建立（请求未发出），已达到重试上限", attempt)
                 sleep(min(2 ** attempt, 20) + random.uniform(0, 1))
+            finally:
+                # 所有路径都异步关闭本次响应，绝不在主线程同步 close（可能排空响应体而阻塞）。
+                close_async(response)
 
 
 @contextmanager

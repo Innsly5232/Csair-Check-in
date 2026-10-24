@@ -195,8 +195,9 @@ class Tests(unittest.TestCase):
                 with self.assertRaises(ValueError): m.load_cookies(p)
 
     def test_read_body_within_aborts_real_slow_socket(self):
-        # 真实回归：真实 requests + 真实慢速 HTTP 服务。服务端发送头后逐字节滴送、永不结束。
-        # read_body_within 必须在预算附近返回 timed_out，不被 requests 的阻塞式 close 拖住。
+        # 真实回归：真实 requests + 真实慢速 HTTP 服务 + 完整 sign_one + 清理线程延迟。
+        # 服务端发送头后逐字节滴送、永不结束。即使响应清理（close）被延迟或阻塞，完整 sign_one
+        # 也必须在预算附近返回，不被 with/__exit__ 或 finally 的同步 close 拖住；且不重发 POST。
         try:
             import requests as real_requests
         except ImportError:
@@ -210,34 +211,52 @@ class Tests(unittest.TestCase):
         srv.bind(('127.0.0.1', 0)); srv.listen(1)
         port = srv.getsockname()[1]
         stop = threading.Event()
+        hits = []
 
         def server():
-            try:
-                conn, _ = srv.accept()
-            except OSError:
-                return
-            try:
-                conn.recv(65536)
-                conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n')
-                while not stop.is_set():
-                    conn.sendall(b'x')      # 滴送：永不发完 100000 字节
-                    stop.wait(0.3)
-            except OSError:
-                pass
-            finally:
-                conn.close()
+            while not stop.is_set():
+                try:
+                    conn, _ = srv.accept()
+                except OSError:
+                    return
+                hits.append(1)  # 记录请求次数，验证不重发
+                try:
+                    conn.recv(65536)
+                    conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n')
+                    while not stop.is_set():
+                        conn.sendall(b'x')      # 滴送：永不发完 100000 字节
+                        stop.wait(0.2)
+                except OSError:
+                    pass
+                finally:
+                    conn.close()
 
-        t = threading.Thread(target=server, daemon=True); t.start()
+        threading.Thread(target=server, daemon=True).start()
         self.addCleanup(lambda: (stop.set(), srv.close()))
-        try:
-            response = real_requests.get(f'http://127.0.0.1:{port}/', stream=True, timeout=(2, 2))
-            start = time.monotonic()
-            outcome = m.read_body_within(response, m.MAX_RESPONSE_BYTES, 0.2)
-            elapsed = time.monotonic() - start
-        finally:
-            stop.set()
-        self.assertTrue(outcome.timed_out)
-        self.assertLess(elapsed, 1.0)   # 若主线程等阻塞的 close，会明显超过预算
+
+        # 模拟清理线程被延迟调度：真正的 close 推迟 0.1s 再在后台执行，
+        # 以证明主线程返回不依赖后台 close 的时机。
+        real_close_async = m.close_async
+        def delayed_close_async(response):
+            threading.Timer(0.1, real_close_async, args=(response,)).start()
+
+        # deadline = connect_timeout + read_timeout + ACCOUNT_TIME_BUDGET，这里约 2.2s。
+        connect_timeout = read_timeout = 1.0
+        budget = 0.2
+        deadline_est = connect_timeout + read_timeout + budget
+        start = time.monotonic()
+        with patch.object(m, 'SIGN_URL', f'http://127.0.0.1:{port}/'), \
+             patch.object(m, 'ACCOUNT_TIME_BUDGET', budget), \
+             patch.object(m, 'close_async', side_effect=delayed_close_async):
+            result = m.sign_one('sid=x', real_requests, connect_timeout=connect_timeout,
+                                read_timeout=read_timeout, retries=0, sleep=lambda _: None)
+        elapsed = time.monotonic() - start
+        stop.set()
+        self.assertEqual(result.status, '结果不确定')
+        self.assertIn('时间上限', result.detail)
+        # 若主线程被 with/__exit__ 或 finally 的同步 close 拖住，会明显超过预算。
+        self.assertLess(elapsed, deadline_est + 0.6)
+        self.assertEqual(len(hits), 1)     # 只提交一次，未重发
 
     def test_lock_and_release(self):
         with tempfile.TemporaryDirectory() as d:
