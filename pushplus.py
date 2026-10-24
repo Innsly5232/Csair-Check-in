@@ -11,6 +11,7 @@ Token 只从环境变量读取；不读取、不发送南航 Cookie；日志不�
 
 import argparse
 import datetime as dt
+import http.client
 import json
 import os
 import random
@@ -40,8 +41,10 @@ def post_once(payload):
                                      headers={"Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.build_opener(NoRedirect()).open(request, timeout=20) as response:
+            status = response.status
+            # read() 可能在此抛 IncompleteRead（响应体传输中断），须包含在 try 内。
             raw = response.read(65537)
-            if response.status != 200 or len(raw) > 65536:
+            if status != 200 or len(raw) > 65536:
                 raise ValueError("invalid response")
             data = json.loads(raw)
             if not isinstance(data, dict) or data.get("code") != 200:
@@ -55,6 +58,8 @@ def post_once(payload):
         if exc.code >= 500:
             raise Retryable from None
         raise ValueError("http error") from None
+    except http.client.HTTPException:  # 含 IncompleteRead：响应体传输中断，非 OSError，值得重试
+        raise Retryable from None
     except OSError:  # 含 URLError、超时、连接重置
         raise Retryable from None
 

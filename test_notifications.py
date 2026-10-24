@@ -98,6 +98,27 @@ class Notifications(unittest.TestCase):
             self.assertEqual(connect.call_count, 3)
             self.assertNotIn('private-token', out.getvalue())
 
+    def test_body_transfer_interrupted_is_retried(self):
+        import http.client
+        # IncompleteRead 不是 OSError，且在读响应体时抛出：须被归为可重试并重试满 3 次。
+        for exc in (http.client.IncompleteRead(b'partial-private'), http.client.HTTPException('private')):
+            with self.subTest(exc=type(exc).__name__):
+                response = MagicMock()
+                response.__enter__.return_value = response
+                response.status = 200
+                response.read.side_effect = exc  # 连接建立后，读响应体时中断
+                opener = MagicMock()
+                opener.open.return_value = response
+                with patch.dict(os.environ, {'PUSHPLUS_TOKEN': 'private-token'}), patch.object(m.pushplus.time, 'sleep'), patch.object(m.urllib.request, 'build_opener', return_value=opener), contextlib.redirect_stderr(io.StringIO()) as out:
+                    self.assertFalse(m.notify_failures(['失败']))
+                    self.assertEqual(opener.open.call_count, 3)
+                self.assertNotIn('private', out.getvalue())
+        # HTTPException 在 open() 阶段抛出同样应重试（例如 BadStatusLine）。
+        with patch.dict(os.environ, {'PUSHPLUS_TOKEN': 'private-token'}), patch.object(m.pushplus.time, 'sleep'), patch.object(m.urllib.request, 'build_opener', side_effect=http.client.BadStatusLine('private')) as connect, contextlib.redirect_stderr(io.StringIO()) as out:
+            self.assertFalse(m.notify_failures(['失败']))
+            self.assertEqual(connect.call_count, 3)
+            self.assertNotIn('private', out.getvalue())
+
     def test_missing_token_or_no_failures_do_not_connect(self):
         with patch.object(m.urllib.request, 'build_opener') as connect, contextlib.redirect_stderr(io.StringIO()):
             self.assertTrue(m.notify_failures([]))
