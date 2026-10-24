@@ -2,7 +2,7 @@
 
 仓库：https://github.com/Innsly5232/Csair-Check-in
 
-每天北京时间 08:17 由 GitHub Actions 执行，无需 Mac 开机。调度可能延迟。
+每天北京时间 08:19 由 GitHub Actions 执行，无需 Mac 开机。调度可能延迟。
 
 ## 设置账号
 
