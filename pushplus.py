@@ -8,7 +8,8 @@ Token 只从环境变量读取；不读取、不发送南航 Cookie；日志不�
 重试仅针对网络异常和 HTTP 5xx（最多 2 次，退避）；PushPlus 明确拒绝、4xx、重定向、无效响应不重试。
 重试可能让同一条提醒送达两次，这里可以接受；签到 POST 的重试规则与此无关。
 每次请求在独立子进程中执行，默认总时限 20 秒；含重试、退避的一条通知总预算为 75 秒。
-network_worker.py 缺失或损坏时降级为进程内直接发送，保证兜底提醒仍能发出。
+network_worker.py 缺失或损坏时降级为进程内直接发送，尽力发出兜底提醒；该路径只有 socket 超时，
+不保证 75 秒总时限。
 """
 
 import argparse
@@ -52,7 +53,7 @@ def post_once(payload, timeout=NOTIFY_ATTEMPT_TIMEOUT):
     """网络请求放在可终止的子进程中，缓慢响应或 DNS 不能无限占用推送时间。
 
     network_worker 不可用时降级为进程内直接发送：仍有 socket 超时，但失去强制终止能力。
-    这条路径只在工作流本身已损坏时使用，优先保证提醒能发出。
+    这条路径只在工作流本身已损坏时使用，尽力发出提醒，不保证总时限。
     """
     network_worker = _load_worker()
     if network_worker is None:
