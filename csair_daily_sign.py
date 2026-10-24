@@ -235,8 +235,9 @@ class _ReadOutcome:
 def read_body_within(response, max_bytes, timeout):
     """在后台线程中有界读取响应体，主线程最多等待 timeout 秒。
 
-    若超时仍未读完，主动关闭响应打断底层 socket 并返回 timed_out；不依赖迭代器配合，
-    因此服务端逐字节阻塞时也能及时中止。后台线程为守护线程，不会阻塞进程退出。
+    若超时仍未读完立即返回 timed_out，不等待读取线程，因此服务端逐字节阻塞时总时长上限仍成立。
+    关闭响应（打断底层 socket）在丢弃的守护线程中异步进行——requests 的 close 会排空响应体，
+    与阻塞的读取线程一起也会阻塞，绝不能放在主线程路径上。所有后台线程均为守护线程，不阻塞进程退出。
     """
     outcome = _ReadOutcome()
 
@@ -257,11 +258,19 @@ def read_body_within(response, max_bytes, timeout):
     thread.join(timeout if timeout and timeout > 0 else 0)
     if thread.is_alive():
         outcome.timed_out = True
-        try:
-            response.close()  # 打断阻塞的 socket 读取，让后台线程尽快结束
-        except Exception:
-            pass
+        # 关键：不在主线程调用 response.close()。requests 的 close 会排空(drain)响应体，
+        # 当后台线程正阻塞读取时它也会一并阻塞，使总时长上限形同虚设。改为在丢弃的守护线程中
+        # 异步关闭（尽力打断底层 socket），主线程立即返回。残留的连接/线程随签到进程退出回收，
+        # 账号数量有限不会累积。
+        threading.Thread(target=_close_quietly, args=(response,), daemon=True).start()
     return outcome
+
+
+def _close_quietly(response):
+    try:
+        response.close()
+    except Exception:
+        pass
 
 
 def sign_one(cookie, requests_module, connect_timeout=10, read_timeout=20,

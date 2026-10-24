@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch, Mock
 
@@ -129,12 +130,14 @@ class Tests(unittest.TestCase):
         # 真实阻塞复现：服务端在 next() 中逐块阻塞，单次 read 不超时，迭代器也不主动结束。
         # 后台线程读取 + 主线程限时等待，应在预算内主动中断、关闭响应、且不重发 POST。
         import time as _time
-        closed = {'n': 0}
+        closed = threading.Event()
         class Blocking(Response):
             def __init__(self):
                 super().__init__(data={})
             def close(self):
-                closed['n'] += 1
+                # 模拟 requests 的 close 会排空响应体而阻塞；必须在主线程路径之外执行。
+                _time.sleep(0.6)
+                closed.set()
             def iter_content(self, **kw):
                 for _ in range(50):
                     _time.sleep(0.05)  # 阻塞发生在 next() 内部，检查无法在循环体执行
@@ -146,8 +149,10 @@ class Tests(unittest.TestCase):
         self.assertEqual(result.status, '结果不确定')
         self.assertIn('时间上限', result.detail)
         self.assertEqual(session.post.call_count, 1)
-        self.assertLess(elapsed, 1.0)        # 远小于迭代器自然结束所需的 ~2.5s
-        self.assertGreaterEqual(closed['n'], 1)  # 超时后主动关闭响应打断 socket
+        # 关键：close() 阻塞 0.6s，但主线程不等它，应在预算附近就返回。
+        self.assertLess(elapsed, 0.5)
+        # close() 确实在后台异步执行（打断连接），只是不在主线程热路径上。
+        self.assertTrue(closed.wait(2.0))
 
     def test_read_error_is_uncertain_not_retried(self):
         # 读取响应体阶段抛异常（请求体已发出）：归为结果不确定，不重发，诊断只含类名。
@@ -187,6 +192,51 @@ class Tests(unittest.TestCase):
             for bad in ('not-a-cookie', '=abc', 'sid=中文', 'sid=abc\x00'):
                 p.write_text(bad)
                 with self.assertRaises(ValueError): m.load_cookies(p)
+
+    def test_read_body_within_aborts_real_slow_socket(self):
+        # 真实回归：真实 requests + 真实慢速 HTTP 服务。服务端发送头后逐字节滴送、永不结束。
+        # read_body_within 必须在预算附近返回 timed_out，不被 requests 的阻塞式 close 拖住。
+        try:
+            import requests as real_requests
+        except ImportError:
+            self.skipTest('需要真实 requests；本地桩环境跳过，CI 覆盖')
+        if not hasattr(real_requests, 'get'):
+            self.skipTest('检测到最小桩 requests（无 get），跳过真实 socket 测试；CI 覆盖')
+        import socket as _socket
+
+        srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        srv.bind(('127.0.0.1', 0)); srv.listen(1)
+        port = srv.getsockname()[1]
+        stop = threading.Event()
+
+        def server():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            try:
+                conn.recv(65536)
+                conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n')
+                while not stop.is_set():
+                    conn.sendall(b'x')      # 滴送：永不发完 100000 字节
+                    stop.wait(0.3)
+            except OSError:
+                pass
+            finally:
+                conn.close()
+
+        t = threading.Thread(target=server, daemon=True); t.start()
+        self.addCleanup(lambda: (stop.set(), srv.close()))
+        try:
+            response = real_requests.get(f'http://127.0.0.1:{port}/', stream=True, timeout=(2, 2))
+            start = time.monotonic()
+            outcome = m.read_body_within(response, m.MAX_RESPONSE_BYTES, 0.2)
+            elapsed = time.monotonic() - start
+        finally:
+            stop.set()
+        self.assertTrue(outcome.timed_out)
+        self.assertLess(elapsed, 1.0)   # 若主线程等阻塞的 close，会明显超过预算
 
     def test_lock_and_release(self):
         with tempfile.TemporaryDirectory() as d:
