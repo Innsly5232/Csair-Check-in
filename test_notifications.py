@@ -14,6 +14,10 @@ class Notifications(unittest.TestCase):
         env = patch.dict(os.environ, {}, clear=True)
         env.start()
         self.addCleanup(env.stop)
+        # 这些测试覆盖 HTTP 协议与重试；进程总时限由 test_network_deadlines 以真实 socket 覆盖。
+        transport = patch.object(m.pushplus, 'post_once', side_effect=m.pushplus._post_once)
+        transport.start()
+        self.addCleanup(transport.stop)
 
     def test_names_follow_original_lines_and_duplicates(self):
         with patch.dict(os.environ, {'CSAIR_COOKIES': 'sid=a\nsid=a\nsid=b',
@@ -131,3 +135,4 @@ class Notifications(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

@@ -31,6 +31,18 @@ class FaultIsolation(unittest.TestCase):
         self.assertIn('157', '\n'.join(errors))
         self.assertNotIn('183', '\n'.join(errors))
 
+    def test_workflow_requires_183_and_missing_183_notifies_without_blocking_others(self):
+        workflow = (Path(__file__).parent / '.github/workflows/csair-sign.yml').read_text(encoding='utf-8')
+        import re
+        required = re.search(r'CSAIR_REQUIRED_ACCOUNTS: "([^"]+)"', workflow).group(1)
+        self.assertEqual(set(required.split(',')), {'159', '157', '185', '183'})
+        code, calls, errors = self.run_batch({
+            'CSAIR_REQUIRED_ACCOUNTS': required,
+            'CSAIR_COOKIE_159': 'sid=a', 'CSAIR_COOKIE_157': 'sid=b',
+            'CSAIR_COOKIE_185': 'sid=c', 'CSAIR_COOKIE_183': ''}, [m.Result('签到成功', 'ok')] * 3)
+        self.assertEqual((code, calls), (1, 3))
+        self.assertIn('CSAIR_COOKIE_183 未配置或为空', '\n'.join(errors))
+
     def test_unexpected_account_error_continues_without_retry(self):
         code, calls, errors = self.run_batch({'CSAIR_COOKIE_159':'sid=a', 'CSAIR_COOKIE_157':'sid=b'}, [RuntimeError('sid=a'),m.Result('签到成功','ok')])
         self.assertEqual((code,calls),(1,2))
@@ -67,7 +79,7 @@ class FaultIsolation(unittest.TestCase):
         response.__enter__.return_value = response
         response.status_code=401
         with patch.dict(os.environ, {'https_proxy':'http://proxy.invalid:8080'}), patch.object(requests, 'Session', return_value=session), patch.object(session, 'post',return_value=response):
-            result=m.sign_one('sid=a',requests,ignore_proxy=True)
+            result=m._sign_one('sid=a',requests,ignore_proxy=True)
             settings=session.merge_environment_settings(m.SIGN_URL,{},True,None,None)
             self.assertFalse(settings['proxies'])
             self.assertFalse(session.trust_env)
@@ -88,3 +100,4 @@ class FaultIsolation(unittest.TestCase):
             self.assertIn('159',content)
             self.assertIn('183',content)
             self.assertIn('今日已签',content)
+
