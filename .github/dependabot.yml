@@ -1,0 +1,29 @@
+version: 2
+updates:
+  # GitHub Actions：有新版时提 PR 更新固定的 commit SHA（注释里的版本号也会同步）。
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "02:00"
+      timezone: Asia/Shanghai
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
+    open-pull-requests-limit: 5
+
+  # Python 依赖（requirements.txt）：安全与版本更新。合并前请在 PR 上确认哈希随之更新。
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "02:00"
+      timezone: Asia/Shanghai
+    commit-message:
+      prefix: deps
+    labels:
+      - dependencies
+    open-pull-requests-limit: 5
