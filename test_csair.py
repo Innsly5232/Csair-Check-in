@@ -114,8 +114,12 @@ class Tests(unittest.TestCase):
                 self.assertEqual(m.load_cookies(p)[0][0].cookie, 'sid=env')
                 self.assertEqual(m.load_cookies(p, explicit=True)[0][0].cookie, 'sid=abc; x=1')
             p.write_text('')
-            with patch.object(m, 'CONFIG_COOKIES', ['sid=old']), self.assertRaises(ValueError):
+            with self.assertRaises(ValueError):
                 m.load_cookies(p)
+            # 代码内不再有可写入 Cookie 的位置；文件不存在也没有环境变量时同样报错。
+            self.assertFalse(hasattr(m, 'CONFIG_COOKIES'))
+            with self.assertRaises(ValueError):
+                m.load_cookies(Path(d)/'missing.txt')
             for bad in ('not-a-cookie', '=abc', 'sid=中文', 'sid=abc\x00'):
                 p.write_text(bad)
                 with self.assertRaises(ValueError): m.load_cookies(p)
