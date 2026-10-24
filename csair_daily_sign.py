@@ -428,7 +428,8 @@ def parse_args(argv=None):
     parser.add_argument("--check", action="store_true", help="只校验本地 Cookie 格式，不联网，不验证有效期")
     parser.add_argument("--connect-timeout", type=float, default=10)
     parser.add_argument("--read-timeout", type=float, default=20)
-    parser.add_argument("--retries", type=int, default=MAX_RETRY, help="仅建连超时的重试次数，0–5")
+    parser.add_argument("--retries", type=int, default=MAX_RETRY,
+                        help="仅建连超时、DNS 失败或连接被拒绝等明确未发送请求时的重试次数，0–5")
     parser.add_argument("--sleep-min", type=float, default=SLEEP_MIN)
     parser.add_argument("--sleep-max", type=float, default=SLEEP_MAX)
     parser.add_argument("--no-proxy", action="store_true", help="忽略 Requests 的代理配置；不绕过系统 TUN")
