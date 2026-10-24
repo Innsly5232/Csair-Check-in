@@ -43,6 +43,7 @@ Actions → 南航每日签到 → Run workflow。默认勾选 `check_only`，�
 - 南航接口、请求体和业务响应仍需首次真实运行验证，离线测试通过不代表真实签到成功。
 - 仅建连超时自动重试；读超时、断连、5xx 等结果不确定时不重复提交，请先在 App 核对。
 - 工作流只读仓库权限，凭证只注入必要步骤，签到任务串行执行。
+- 第三方 Actions 固定到 commit SHA（注释标注对应版本），并由 Dependabot 每周检查 Actions 和 pip 更新。
 - 使用 Python 3.12 和固定版本 Requests；运行测试：`python -m unittest discover -v`。
 - 脚本保留旧版本地文件/环境变量用法用于兼容，但当前 GitHub 工作流仅使用四个独立 Secret。代码里不再保存 Cookie（已移除 `CONFIG_COOKIES`）。
 
