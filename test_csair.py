@@ -88,6 +88,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(session.post.call_count, 3)
 
     def test_no_retry_ambiguous(self):
+        # 裸 ConnectionError（无 urllib3 连接前原因）无法确认请求体是否已发出，不重试。
         for exc in (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError,
                     requests.exceptions.ChunkedEncodingError):
             with self.subTest(exc=exc):
@@ -95,6 +96,51 @@ class Tests(unittest.TestCase):
                 self.assertEqual(result.status, '结果不确定')
                 self.assertEqual(session.post.call_count, 1)
                 self.assertNotIn('secret', result.detail)
+
+    def _connection_error_caused_by(self, name):
+        # 构造异常链：ConnectionError 的 __cause__ 是名为 name 的 urllib3 风格异常。
+        cause = type(name, (Exception,), {})('boom')
+        exc = requests.exceptions.ConnectionError('wrapped')
+        exc.__cause__ = cause
+        return exc
+
+    def test_connection_before_send_is_retried(self):
+        # DNS 解析失败、连接被拒绝、建连超时：请求体未发出，应重试后成功。
+        for name in ('NewConnectionError', 'NameResolutionError', 'ConnectTimeoutError'):
+            with self.subTest(name=name):
+                result, session = self.invoke([self._connection_error_caused_by(name),
+                                               Response(data={'message': '签到成功'})])
+                self.assertTrue(result.ok)
+                self.assertEqual(result.attempts, 2)
+        # 达到重试上限后给出明确诊断，且只含异常类名、不含内容。
+        result, session = self.invoke([self._connection_error_caused_by('NewConnectionError')] * 3)
+        self.assertEqual((result.status, session.post.call_count), ('请求失败', 3))
+        self.assertIn('ConnectionError', result.detail)
+        self.assertNotIn('boom', result.detail)
+
+    def test_connection_after_send_not_retried(self):
+        # 连接建立后断开（ProtocolError / RemoteDisconnected）无法确认是否已提交，不重试。
+        for name in ('ProtocolError', 'RemoteDisconnected'):
+            with self.subTest(name=name):
+                result, session = self.invoke([self._connection_error_caused_by(name)])
+                self.assertEqual((result.status, session.post.call_count), ('结果不确定', 1))
+
+    def test_slow_body_hits_time_budget(self):
+        # 服务端极慢逐字节返回：单次 read 不超时，但总读取时长超限应中止且不重发。
+        # 假时钟：deadline 计算时为 0，读到第二个 chunk 时跳过上限。
+        ticks = {'n': 0}
+        def fake_monotonic():
+            ticks['n'] += 1
+            return 0 if ticks['n'] <= 2 else m.ACCOUNT_TIME_BUDGET + 10 ** 6
+        class Slow(Response):
+            def iter_content(self, **kw):
+                yield b'{"respMsg"'
+                yield b':"x"}'
+        with patch.object(m.time, 'monotonic', side_effect=fake_monotonic):
+            result, session = self.invoke([Slow(data={})])
+        self.assertEqual(result.status, '结果不确定')
+        self.assertIn('时间上限', result.detail)
+        self.assertEqual(session.post.call_count, 1)
 
     def test_bad_json_and_size(self):
         for raw in (b'<html>secret</html>', b'\xff', b'x'*(m.MAX_RESPONSE_BYTES+1)):
