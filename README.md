@@ -15,7 +15,7 @@
 | `CSAIR_COOKIE_157` | 157 账号的完整 Cookie |
 | `CSAIR_COOKIE_185` | 185 账号的完整 Cookie |
 | `CSAIR_COOKIE_183` | 183 账号的完整 Cookie |
-| `PUSHPLUS_TOKEN` | PushPlus 个人 Token，已绑定接收短信的手机号 |
+| `PUSHPLUS_TOKEN` | PushPlus 个人 Token，已绑定新消息ClawBot（cmcc）渠道 |
 
 每个 Cookie Secret 只填该账号的一条完整 Cookie，不填账号名、不加引号、不放多个账号。无需 Cookie 文件，也无需 `CSAIR_ACCOUNT_NAMES` 或 `CSAIR_COOKIES`；这两个旧 Secret 不再被 GitHub 工作流读取，可以删除。
 
@@ -33,7 +33,7 @@ Actions → 南航每日签到 → Run workflow。默认勾选 `check_only`，�
 
 失败和结果不确定的账号合并为一条通知，包含账号数字、北京时间和固定原因说明。涵盖凭证失效、403、429、网络错误、服务器异常、未知响应及配置错误。成功或今日已签不推送，没有钉钉或其他机器人通知。
 
-不发送 Cookie、原始服务器响应或异常文本。PushPlus 请求独立发送，不携带南航 Cookie；不自动重试通知。通知失败不会改变签到失败状态，详细诊断可查 Actions。PushPlus 接受请求不代表短信最终送达；缺少或填错 Token、额度用尽或网络故障都会影响通知。
+不发送 Cookie、原始服务器响应或异常文本。PushPlus 请求独立发送，不携带南航 Cookie；不自动重试通知。通知失败不会改变签到失败状态，详细诊断可查 Actions。PushPlus 接受请求不代表手机最终送达；缺少或填错 Token、额度用尽或网络故障都会影响通知。
 
 签到前的安装/测试失败会尝试发送工作流提醒。GitHub 未启动任务、拉取代码失败、运行器中断、任务被强制终止时无法保证通知。每次真实运行失败都会提醒，直到修复；仅检查模式即使失败也不推送。
 
@@ -56,12 +56,14 @@ PushPlus 接口文档：https://www.pushplus.plus/doc/guide/api.html
 - `--no-proxy` 已修正为关闭 Requests 的环境配置读取，包括环境代理；不绕过系统 TUN。
 - 离线测试不会访问南航或发送真实通知。
 
-## 短信渠道
+## CMCC 新消息ClawBot 渠道
 
-推送明确指定 `channel: sms`，接口为 `https://www.pushplus.plus/send`，继续使用 `PUSHPLUS_TOKEN`，无需单独设置短信 URL 或手机号 Secret。手机号须在 PushPlus 个人资料中绑定，账号需有足够积分。
+推送明确指定 `channel: cmcc` 和 `template: txt`，接口为 `https://www.pushplus.plus/send`。继续使用 `PUSHPLUS_TOKEN`，不需要 `option`，无需增加手机号或 Channel API Key 的 GitHub Secret。
 
-官方说明成功发送一条短信扣减 10 积分（0.1 元）。短信仅展示固定提醒，无法显示自定义账号、错误原因或链接；完整失败详情仍提交到 PushPlus，可在消息记录或 GitHub Actions 日志查看。每次运行的多个失败合并为一条通知，不自动重试；持续失败会在后续每天运行时再次提醒。
+此渠道仅支持中国移动用户。先在手机 5G 消息的“新消息ClawBot”应用号中获取以 `ak_` 或 `app_` 开头的 Channel API Key，再到 PushPlus 个人中心 → 渠道配置 → 新消息ClawBot 中保存绑定。GitHub 的 `PUSHPLUS_TOKEN` 填 PushPlus Token，不要填 Channel API Key。
 
-手动勾选 `test_pushplus` 也会请求发送短信，可能产生上述费用。离线测试使用模拟接口，不发送真实短信。
+官方将 cmcc 列为免费渠道，正文使用 txt 模板尽量完整展示，可携带账号数字和失败原因。多个账号失败合并一次通知，不自动重试；持续失败会在后续每天运行时再次提醒。
 
-短信官方说明：https://pushplus.plus/doc/extend/sms.html
+勾选 `test_pushplus` 可单独发送一条明确标记为测试的消息，不提交签到。离线测试模拟接口，不发送真实通知。接受请求不等于手机最终收到，需通过手机消息确认。
+
+官方说明：https://www.pushplus.plus/doc/channel/cmcc.html

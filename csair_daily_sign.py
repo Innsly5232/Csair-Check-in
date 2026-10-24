@@ -336,7 +336,7 @@ def notify_failures(failures, title="南航签到失败提醒"):
     content += "\n\n" + "\n\n".join(failures)
     content += "\n\nCookie 失效请更新对应账号的 CSAIR_COOKIE_数字 Secret；结果不确定请先在南航 App 核对。"
     payload = {"token": token, "title": title, "content": content,
-               "template": "txt", "channel": "sms"}
+               "template": "txt", "channel": "cmcc"}
     try:
         request = urllib.request.Request("https://www.pushplus.plus/send",
                   data=json.dumps(payload).encode("utf-8"),
@@ -353,7 +353,7 @@ def notify_failures(failures, title="南航签到失败提醒"):
                 not isinstance(item, dict) or item.get("code") != 200 for item in channels
             ):
                 raise ValueError("channel rejected")
-        print("PushPlus 已接受通知请求（不代表短信已送达）。")
+        print("PushPlus 已接受通知请求（不代表手机已送达）。")
         return True
     except Exception:
         print("PushPlus 通知未确认：请检查 Token、额度或网络；签到失败状态保留。", file=sys.stderr)
