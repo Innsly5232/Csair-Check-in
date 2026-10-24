@@ -30,7 +30,7 @@ class NumberedAccounts(unittest.TestCase):
 
     def test_duplicate_keeps_first_identifier(self):
         with patch.dict(os.environ, {'CSAIR_COOKIE_159':'sid=same', 'CSAIR_COOKIE_157':'sid=same',
-                                    'CSAIR_COOKIE_193':'Cookie: sid=other'}, clear=True):
+                                    'CSAIR_COOKIE_183':'Cookie: sid=other'}, clear=True):
             accounts, count = m.load_cookies()
-        self.assertEqual([a.label for a in accounts], ['159','193'])
+        self.assertEqual([a.label for a in accounts], ['159','183'])
         self.assertEqual(count, 1)

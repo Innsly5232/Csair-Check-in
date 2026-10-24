@@ -7,8 +7,9 @@
 运行：python3 csair_daily_sign.py
 帮助：python3 csair_daily_sign.py --help
 
-GitHub 使用 CSAIR_COOKIE_159 / 157 / 185 / 193，后缀即账号标识；无需备注配置。
-独立 Secret 存在时优先读取，空值跳过；全部为空报错，不回退旧配置。
+GitHub 使用 CSAIR_COOKIE_159 / 157 / 185 / 183，后缀即账号标识；无需备注配置。
+独立 Secret 存在时优先读取；CSAIR_REQUIRED_ACCOUNTS 指定必需账号，空值报错。
+单个账号配置错误不阻止其他有效账号；失败统一汇总并返回非零退出码。
 以下为本地旧版兼容方式。cookies.txt：每行一个完整 Cookie，支持 Cookie: 前缀、UTF-8 BOM 和 # 注释。
 优先级：显式 --cookies > CSAIR_COOKIES 环境变量（多行）> cookies.txt
         > CONFIG_COOKIES（仅当 cookies.txt 不存在）。空文件不会回退旧账号。
@@ -43,7 +44,7 @@ import time
 BASE_DIR = Path(__file__).resolve().parent
 COOKIE_FILE = BASE_DIR / "cookies.txt"
 LOG_FILE = BASE_DIR / "sign_log.txt"
-ACCOUNT_IDS = ("159", "157", "185", "193")
+ACCOUNT_IDS = ("159", "157", "185", "183")
 CONFIG_COOKIES = []  # 兼容旧版；建议把凭证放在 cookies.txt
 SLEEP_MIN, SLEEP_MAX = 3, 8
 MAX_RETRY = 2
@@ -88,28 +89,40 @@ class AlreadyRunning(Exception):
     pass
 
 
-def load_cookies(path=COOKIE_FILE, explicit=False):
+def load_cookies(path=COOKIE_FILE, explicit=False, errors=None):
     """返回账号及精确重复条数；不输出凭证，也不重新排列 Cookie 字段。"""
     path = Path(path)
     independent = not explicit and any(f"CSAIR_COOKIE_{key}" in os.environ for key in ACCOUNT_IDS)
     if independent:
-        accounts, seen, duplicates = [], set(), 0
+        accounts, seen, duplicates = [], {}, 0
+        required = [key.strip() for key in os.environ.get("CSAIR_REQUIRED_ACCOUNTS", "").split(",") if key.strip()]
+        if any(key not in ACCOUNT_IDS for key in required):
+            raise ValueError("CSAIR_REQUIRED_ACCOUNTS 包含不支持的账号标识")
+        def report(message):
+            if errors is None:
+                raise ValueError(message)
+            errors.append(message)
         for key in ACCOUNT_IDS:
             cookie = os.environ.get(f"CSAIR_COOKIE_{key}", "").strip().lstrip("\ufeff")
             if not cookie:
+                if key in required:
+                    report(f"账号 {key}：CSAIR_COOKIE_{key} 未配置或为空")
                 continue
             cookie = re.sub(r"^cookie\s*:\s*", "", cookie, flags=re.I)
             parts = [part.strip() for part in cookie.split(";") if part.strip()]
             if (not cookie or any(ord(c) < 32 or ord(c) > 126 for c in cookie)
                     or not parts or any("=" not in part or not part.split("=", 1)[0].strip() for part in parts)):
-                raise ValueError(f"账号 {key}：CSAIR_COOKIE_{key} 格式错误，须填写单个账号的完整 Cookie")
+                report(f"账号 {key}：CSAIR_COOKIE_{key} 格式错误，须填写单个账号的完整 Cookie")
+                continue
             if cookie in seen:
                 duplicates += 1
+                if errors is not None:
+                    errors.append(f"账号 {key}：Cookie 与账号 {seen[cookie]} 完全相同，已跳过重复提交，请核对配置")
                 continue
-            seen.add(cookie)
+            seen[cookie] = key
             accounts.append(Account(key, cookie))
-        if not accounts:
-            raise ValueError("未配置账号：请至少填写一个 CSAIR_COOKIE_159 / 157 / 185 / 193 Secret")
+        if not accounts and not errors:
+            raise ValueError("未配置账号：请至少填写一个 CSAIR_COOKIE_159 / 157 / 185 / 183 Secret")
         return accounts, duplicates
     if explicit:
         lines = path.read_text(encoding="utf-8-sig").splitlines()
@@ -182,7 +195,8 @@ def sign_one(cookie, requests_module, connect_timeout=10, read_timeout=20,
     req = requests_module
     with req.Session() as session:
         if ignore_proxy:
-            session.proxies.update({"http": "", "https": "", "all": ""})
+            session.trust_env = False
+            session.proxies.clear()
         headers = dict(HEADERS, Cookie=cookie)
         for attempt in range(1, retries + 2):
             try:
@@ -283,6 +297,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--cookies", type=Path, help="指定 Cookie 文件；显式参数优先于环境变量")
     parser.add_argument("--log", type=Path, default=LOG_FILE, help="日志文件路径")
+    parser.add_argument("--test-pushplus", action="store_true", help="仅发送一条固定推送测试消息，不读取 Cookie、不签到")
     parser.add_argument("--check", action="store_true", help="只校验本地 Cookie 格式，不联网，不验证有效期")
     parser.add_argument("--connect-timeout", type=float, default=10)
     parser.add_argument("--read-timeout", type=float, default=20)
@@ -291,6 +306,8 @@ def parse_args(argv=None):
     parser.add_argument("--sleep-max", type=float, default=SLEEP_MAX)
     parser.add_argument("--no-proxy", action="store_true", help="忽略 Requests 的代理配置；不绕过系统 TUN")
     args = parser.parse_args(argv)
+    if args.check and args.test_pushplus:
+        parser.error("--check 与 --test-pushplus 不能同时使用")
     values = (args.connect_timeout, args.read_timeout, args.sleep_min, args.sleep_max)
     if (not all(math.isfinite(v) for v in values) or min(values[:2]) <= 0
             or not 0 <= args.sleep_min <= args.sleep_max or not 0 <= args.retries <= 5):
@@ -303,7 +320,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def notify_failures(failures):
+def notify_failures(failures, title="南航签到失败提醒"):
     """只发送固定诊断和用户备注；独立连接，不带南航 Cookie，不重试。"""
     if not failures:
         return True
@@ -314,7 +331,7 @@ def notify_failures(failures):
     content = "时间：" + dt.datetime.now(CHINA_TZ).strftime("%Y-%m-%d %H:%M:%S +0800")
     content += "\n\n" + "\n\n".join(failures)
     content += "\n\nCookie 失效请更新对应账号的 CSAIR_COOKIE_数字 Secret；结果不确定请先在南航 App 核对。"
-    payload = {"token": token, "title": "南航签到失败提醒", "content": content,
+    payload = {"token": token, "title": title, "content": content,
                "template": "txt", "channel": "wechat"}
     try:
         request = urllib.request.Request("https://www.pushplus.plus/send",
@@ -341,14 +358,28 @@ def notify_failures(failures):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.test_pushplus:
+        return 0 if notify_failures(["这是一条主动推送测试消息，不代表签到失败；本次没有提交签到。"],
+                                    title="南航 PushPlus 推送测试") else 1
     cookie_path = (args.cookies or COOKIE_FILE).expanduser().resolve()
     logger = None
     failures = []
     try:
-        accounts, duplicates = load_cookies(cookie_path, explicit=args.cookies is not None)
+        config_errors = []
+        accounts, duplicates = load_cookies(cookie_path, explicit=args.cookies is not None, errors=config_errors)
+        failures.extend(config_errors)
+        for error in config_errors:
+            print("配置错误：" + error, file=sys.stderr)
         if args.check:
+            if config_errors:
+                return 2
             print(f"本地格式检查通过：{len(accounts)} 个账号，移除 {duplicates} 条精确重复项。未联网验证 Cookie。")
             return 0
+        if os.environ.get("CSAIR_REQUIRE_PUSHPLUS") == "1" and not os.environ.get("PUSHPLUS_TOKEN", "").strip():
+            failures.append("推送配置错误：PUSHPLUS_TOKEN 未设置或为空，无法发送失败提醒")
+            print(failures[-1], file=sys.stderr)
+        if not accounts:
+            return 2
         try:
             import requests
         except ImportError:
@@ -360,8 +391,11 @@ def main(argv=None):
             logger.info("===== 共 %d 个账号；移除 %d 条精确重复项 =====", len(accounts), duplicates)
             counts = Counter()
             for index, account in enumerate(accounts):
-                result = sign_one(account.cookie, requests, args.connect_timeout, args.read_timeout,
-                                  args.retries, args.no_proxy)
+                try:
+                    result = sign_one(account.cookie, requests, args.connect_timeout, args.read_timeout,
+                                      args.retries, args.no_proxy)
+                except Exception:
+                    result = Result("结果不确定", "账号处理出现未预期错误，可能已提交；请在 App 核对，本次不重发")
                 if not result.ok:
                     failures.append(f"账号：{account.label}\n原因：{result.status}｜{result.detail}")
                 counts[result.status] += 1
@@ -369,7 +403,7 @@ def main(argv=None):
                 if index + 1 < len(accounts):
                     time.sleep(random.uniform(args.sleep_min, args.sleep_max))
             logger.info("汇总：%s", "；".join(f"{key} {value}" for key, value in counts.items()))
-            return 0 if counts["签到成功"] + counts["今日已签"] == len(accounts) else 1
+            return 0 if not failures and counts["签到成功"] + counts["今日已签"] == len(accounts) else 1
     except AlreadyRunning:
         failures.append("任务未执行：同一配置已有签到任务正在运行。")
         print("已有任务正在使用此 Cookie 配置，本次跳过。", file=sys.stderr)

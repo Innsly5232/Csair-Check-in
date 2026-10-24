@@ -25,6 +25,11 @@ class Response:
     def iter_content(self, **kw): yield self.raw
 
 class Tests(unittest.TestCase):
+    def setUp(self):
+        env = patch.dict(os.environ, {}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+
     def invoke(self, responses, **kw):
         session = Mock()
         session.__enter__ = Mock(return_value=session)
@@ -131,7 +136,7 @@ class Tests(unittest.TestCase):
             log=Path(d)/'log.txt'
             for results, expected in [([m.Result('签到成功','ok'),m.Result('今日已签','ok')],0),
                                       ([m.Result('签到成功','ok'),m.Result('未知结果','unknown')],1)]:
-                with patch.object(m,'sign_one',side_effect=results), contextlib.redirect_stdout(io.StringIO()):
+                with patch.object(m,'sign_one',side_effect=results), patch.object(m, 'notify_failures'), contextlib.redirect_stdout(io.StringIO()):
                     code=m.main(['--cookies',str(p),'--log',str(log),'--sleep-min','0','--sleep-max','0'])
                 self.assertEqual(code,expected)
             content=log.read_text()

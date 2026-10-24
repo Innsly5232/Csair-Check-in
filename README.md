@@ -14,12 +14,12 @@
 | `CSAIR_COOKIE_159` | 159 账号的完整 Cookie |
 | `CSAIR_COOKIE_157` | 157 账号的完整 Cookie |
 | `CSAIR_COOKIE_185` | 185 账号的完整 Cookie |
-| `CSAIR_COOKIE_193` | 193 账号的完整 Cookie |
+| `CSAIR_COOKIE_183` | 183 账号的完整 Cookie |
 | `PUSHPLUS_TOKEN` | PushPlus 个人 Token，已绑定接收微信 |
 
 每个 Cookie Secret 只填该账号的一条完整 Cookie，不填账号名、不加引号、不放多个账号。无需 Cookie 文件，也无需 `CSAIR_ACCOUNT_NAMES` 或 `CSAIR_COOKIES`；这两个旧 Secret 不再被 GitHub 工作流读取，可以删除。
 
-可以先配置部分账号；未设置或为空的账号会跳过，四个都为空则报错并尝试推送提醒。格式错误会指出对应数字并停止整批运行。相同 Cookie 只处理一次，按 159、157、185、193 顺序保留第一个标识。
+工作流要求 159、157、185 三个账号必须配置，183 暂为可选。缺少必需账号、Cookie 格式错误或重复都会显示账号标识、发送提醒并让任务报错，其他有效账号会继续签到。183 未配置时跳过；如以后需要强制检查它，可在工作流 CSAIR_REQUIRED_ACCOUNTS 中追加 183。相同 Cookie 只提交一次。
 
 例如 157 账号失效，通知显示“账号：157；原因：Cookie 失效”，只需更新 `CSAIR_COOKIE_157`。
 
@@ -27,7 +27,7 @@
 
 Actions → 南航每日签到 → Run workflow。默认勾选 `check_only`，只检查格式，不联网、不推送，也不验证 Cookie 有效期。取消勾选执行真实签到。每日定时任务执行真实签到。
 
-代码提交只运行离线测试，不提交签到。日志与运行摘要会显示各账号结果；只有全部明确成功或今日已签时真实签到运行才通过。
+代码提交只运行离线测试，不提交签到。日志与运行摘要会显示各账号结果；所有已配置账号明确成功或今日已签、必需账号无遗漏且 PushPlus Token 已配置时运行才通过。Token 非空不代表有效，需主动推送测试验证。
 
 ## PushPlus 通知
 
@@ -47,3 +47,11 @@ Actions → 南航每日签到 → Run workflow。默认勾选 `check_only`，�
 - 脚本保留旧版本地文件/环境变量用法用于兼容，但当前 GitHub 工作流仅使用四个独立 Secret。
 
 PushPlus 接口文档：https://www.pushplus.plus/doc/guide/api.html
+
+## 推送检查与故障隔离
+
+- 设置 `PUSHPLUS_TOKEN` 后，手动运行时勾选 `test_pushplus`，只发送一条明确标为测试的通知，不读取 Cookie、不签到；该选项优先于 `check_only`。
+- 实际签到即使全部成功，缺少 PushPlus Token 仍会明确报错，避免误认为通知可用；正常成功不发推送。
+- 一个账号 Cookie 配置错误、重复、遗漏或出现未预期异常，不会阻止其他可用账号签到；所有错误合并通知并保留任务失败状态。
+- `--no-proxy` 已修正为关闭 Requests 的环境配置读取，包括环境代理；不绕过系统 TUN。
+- 离线测试不会访问南航或发送真实通知。
