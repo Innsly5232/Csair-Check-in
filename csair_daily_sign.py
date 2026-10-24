@@ -167,6 +167,10 @@ def classify_response(data):
         return Result("未知结果", "JSON 顶层不是对象，需核对接口响应格式")
     messages = [data[k].strip() for k in ("respMsg", "message")
                 if isinstance(data.get(k), str) and data[k].strip()]
+    # 实际签到 HAR 的 respMsg 为通用 success，明确业务结果位于 data.result。
+    nested = data.get("data")
+    if isinstance(nested, dict) and isinstance(nested.get("result"), str):
+        messages.append(nested["result"].strip())
     msg = " | ".join(messages).lower()
     if any(s in msg for s in ("未登录", "请登录", "重新登录", "登录过期", "登录失效",
                              "登录已过期", "登录已失效", "登录状态失效",
@@ -178,7 +182,7 @@ def classify_response(data):
                              "未签成功", "未能", "没有", "不能", "无法", "unsuccess", "not success",
                              "fail", "error", "not signed", "not checked")):
         return Result("签到未完成", "接口消息含失败或未完成信息")
-    if data.get("success") is False:
+    if data.get("success") is False or (isinstance(nested, dict) and nested.get("success") is False):
         return Result("未知结果", "响应 success=false，不能确认签到完成")
     if any(s in msg for s in ("已签到", "已签过", "已经签到", "重复签到",
                              "今日已签", "今天已签", "already signed in", "already checked in")):

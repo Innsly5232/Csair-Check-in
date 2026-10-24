@@ -40,7 +40,13 @@ class Tests(unittest.TestCase):
         return result, session
 
     def test_classification(self):
-        cases = [({'respMsg':'签到成功'}, '签到成功'),
+        cases = [({'respMsg':'success','respCode':'0000','data':{'code':'00A2','result':'签到成功'}}, '签到成功'),
+                 ({'respMsg':'success','data':{'result':'今日已签到'}}, '今日已签'),
+                 ({'respMsg':'签到成功','data':{'result':'签到失败'}}, '签到未完成'),
+                 ({'respMsg':'success','data':{'result':'请登录'}}, 'Cookie 失效'),
+                 ({'respMsg':'success','data':{'result':'success'}}, '未知结果'),
+                 ({'respMsg':'success','data':{'success':False,'result':'签到成功'}}, '未知结果'),
+                 ({'respMsg':'签到成功'}, '签到成功'),
                  ({'message':'今日已签到'}, '今日已签'),
                  ({'respMsg':'重复签到成功'}, '今日已签'),
                  ({'message':'签到未成功'}, '签到未完成'),
