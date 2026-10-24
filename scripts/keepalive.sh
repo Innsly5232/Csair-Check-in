@@ -10,10 +10,27 @@ WORKFLOWS=(csair-sign.yml keepalive.yml)
 
 api_failed=0
 for workflow in "${WORKFLOWS[@]}"; do
-  # 对已启用的工作流重复启用是幂等操作，成功返回 HTTP 204。
+  # 先查状态：只对 active / disabled_inactivity 调用启用，跳过手动停用，保留主动暂停。
+  state=$(gh api -H 'Accept: application/vnd.github+json' \
+      "repos/${REPO}/actions/workflows/${workflow}" --jq '.state' 2>/dev/null || echo '')
+  case "$state" in
+    disabled_manually)
+      echo "${workflow} 已被手动停用，保活跳过，尊重主动暂停。"
+      continue
+      ;;
+    active|disabled_inactivity)
+      ;;
+    *)
+      # 查不到状态时保守跳过，避免把手动停用的任务误开。
+      echo "::warning::无法获取 ${workflow} 的状态（返回：${state:-空}），本次跳过启用。"
+      api_failed=1
+      continue
+      ;;
+  esac
+  # 对 active 重复启用是幂等操作，成功返回 HTTP 204。
   if gh api --method PUT -H 'Accept: application/vnd.github+json' \
       "repos/${REPO}/actions/workflows/${workflow}/enable" --silent; then
-    echo "已通过 API 重新启用 ${workflow}。"
+    echo "已通过 API 重新启用 ${workflow}（原状态：${state}）。"
   else
     echo "::warning::重新启用 ${workflow} 失败，请检查工作流的 actions: write 权限。"
     api_failed=1

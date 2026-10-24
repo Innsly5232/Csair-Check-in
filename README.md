@@ -72,7 +72,7 @@ PushPlus 接口文档：https://www.pushplus.plus/doc/guide/api.html
 
 每周一 UTC 01:41（北京时间 09:41）运行，分两步：
 
-1. 通过 GitHub API（`PUT /actions/workflows/{文件名}/enable`）重新启用签到和保活两个工作流，不产生提交。
+1. 先查询每个工作流状态，再通过 GitHub API（`PUT /actions/workflows/{文件名}/enable`）重新启用签到和保活两个工作流，不产生提交。只处理 `active`（幂等）和 `disabled_inactivity`（因无活动被停用）；手动停用（`disabled_manually`）会被跳过，保留你主动暂停的设置；状态查询失败时保守跳过并告警。
 2. 兜底：距默认分支最近一次提交满 45 天时，再创建一次空提交并推送默认分支。
 
 无需额外 PAT 或 Secret，使用 GitHub 自带令牌，不会改动代码或保存凭证。保活工作流拥有 `actions: write` 和 `contents: write` 权限，签到工作流仍只读。空提交不会再次触发 push 工作流。API 调用失败时任务标红，GitHub 会发邮件提醒，兜底提交照常尝试。
