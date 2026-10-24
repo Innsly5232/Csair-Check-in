@@ -11,7 +11,7 @@ on:
         default: true
         required: true
       test_pushplus:
-        description: '只测试 PushPlus 推送，不提交签到（优先于仅检查）'
+        description: '仅测试短信推送（成功每条 0.1 元，不签到，优先于仅检查）'
         type: boolean
         default: false
         required: true

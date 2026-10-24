@@ -62,7 +62,7 @@ class Notifications(unittest.TestCase):
         response = MagicMock()
         response.__enter__.return_value = response
         response.status = 200
-        response.read.return_value = b'{"code":200,"data":[{"code":200}]}'
+        response.read.return_value = b'{"code":200,"data":[{"code":200,"channel":"sms"}]}'
         opener = MagicMock()
         opener.open.return_value = response
         with patch.dict(os.environ, {'PUSHPLUS_TOKEN': 'private-token', 'CSAIR_COOKIES': 'sid=private-cookie'}), patch.object(m.urllib.request, 'build_opener', return_value=opener), contextlib.redirect_stdout(io.StringIO()) as out:
@@ -72,6 +72,7 @@ class Notifications(unittest.TestCase):
         self.assertEqual(request.full_url, 'https://www.pushplus.plus/send')
         self.assertEqual(payload['token'], 'private-token')
         self.assertEqual(payload['template'], 'txt')
+        self.assertEqual(payload['channel'], 'sms')
         self.assertNotIn('private-cookie', request.data.decode())
         self.assertNotIn('Cookie', request.headers)
         self.assertNotIn('private-token', out.getvalue())
