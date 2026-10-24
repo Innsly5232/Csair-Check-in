@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import threading
 import time
@@ -197,6 +198,54 @@ class NetworkDeadlines(unittest.TestCase):
         self.assertFalse(accepted)
         self.assertLess(elapsed, 1.1)
         self.assertEqual(len(hits), 1, '预算耗尽后不能再启动下一次重试')
+
+    def test_fallback_push_still_sends_when_network_worker_is_broken(self):
+        # 真实场景：network_worker.py 有语法错误时，py_compile 失败，工作流随即运行兜底提醒。
+        # pushplus.py 必须降级为进程内发送，而不是因导入失败让这次提醒丢失。
+        url, hits = self.server('fast')
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(__file__).resolve().parent / 'pushplus.py'
+            (Path(directory) / 'pushplus.py').write_text(source.read_text(encoding='utf-8'), encoding='utf-8')
+            (Path(directory) / 'network_worker.py').write_text('def broken(:\n', encoding='utf-8')
+            script = ('import sys; sys.path.insert(0, sys.argv[1]); import pushplus; '
+                      'pushplus.PUSHPLUS_URL = sys.argv[2]; '
+                      'raise SystemExit(0 if pushplus.send(["synthetic"]) else 1)')
+            env = {key: value for key, value in os.environ.items() if key != 'PYTHONPATH'}
+            env['PUSHPLUS_TOKEN'] = 'synthetic-token'
+            import subprocess
+            done = subprocess.run([sys.executable, '-c', script, directory, url],
+                                  capture_output=True, text=True, timeout=30, env=env, cwd=directory)
+        self.assertEqual(done.returncode, 0, '兜底提醒必须在 network_worker 损坏时仍能发出')
+        self.assertEqual(len(hits), 1)
+        self.assertIn('进程内直接发送', done.stderr)
+        self.assertNotIn('synthetic-token', done.stdout + done.stderr)
+
+    def test_completed_child_result_is_kept_at_the_deadline_boundary(self):
+        # 子进程已在时限内完整返回，但父进程读完时钟恰好越过时限：必须采用结果，不能改报超时。
+        child = MagicMock()
+        child.communicate.return_value = (
+            b'{"state":"ok","result":{"status":"\\u7b7e\\u5230\\u6210\\u529f","detail":"d","attempts":1}}', None)
+        child.returncode = 0
+        child.poll.return_value = 0
+        clock = iter([0.0, 0.0] + [100.0] * 20)
+        with patch.object(network_worker.subprocess, 'Popen', return_value=child), \
+                patch.object(network_worker.time, 'monotonic', side_effect=lambda: next(clock)):
+            reply = network_worker.run('sign', {'cookie': 'synthetic'}, timeout=2)
+        self.assertEqual(reply['state'], 'ok')
+        self.assertEqual(reply['result']['status'], '签到成功')
+
+    def test_push_accepted_while_crossing_budget_is_not_reported_as_failure(self):
+        # PushPlus 已接受，但这次请求跨过了总预算：应报成功且不重试，避免误报和重复推送。
+        now = {'t': 0.0}
+        def accepted_slowly(payload, timeout):
+            now['t'] += pushplus.NOTIFY_TIME_BUDGET + 1
+        with patch.dict(os.environ, {'PUSHPLUS_TOKEN': 'synthetic'}), \
+                patch.object(pushplus, 'post_once', side_effect=accepted_slowly) as post, \
+                patch.object(pushplus.time, 'monotonic', side_effect=lambda: now['t']), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            accepted = pushplus.send(['synthetic'], retries=2, sleep=lambda _: None)
+        self.assertTrue(accepted)
+        self.assertEqual(post.call_count, 1)
 
     def test_credentials_use_stdin_and_are_removed_from_child_environment(self):
         child = MagicMock()

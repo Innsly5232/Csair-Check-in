@@ -8,6 +8,7 @@ Token 只从环境变量读取；不读取、不发送南航 Cookie；日志不�
 重试仅针对网络异常和 HTTP 5xx（最多 2 次，退避）；PushPlus 明确拒绝、4xx、重定向、无效响应不重试。
 重试可能让同一条提醒送达两次，这里可以接受；签到 POST 的重试规则与此无关。
 每次请求在独立子进程中执行，默认总时限 20 秒；含重试、退避的一条通知总预算为 75 秒。
+network_worker.py 缺失或损坏时降级为进程内直接发送，保证兜底提醒仍能发出。
 """
 
 import argparse
@@ -20,8 +21,6 @@ import sys
 import time
 import urllib.error
 import urllib.request
-
-import network_worker
 
 CHINA_TZ = dt.timezone(dt.timedelta(hours=8))
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
@@ -40,8 +39,26 @@ class Retryable(Exception):
     """网络层失败或服务端 5xx，值得重试。"""
 
 
+def _load_worker():
+    """按需加载 network_worker；它缺失或有语法错误时返回 None，让兜底提醒仍能发出。"""
+    try:
+        import network_worker
+        return network_worker
+    except Exception:  # 含 ImportError、SyntaxError
+        return None
+
+
 def post_once(payload, timeout=NOTIFY_ATTEMPT_TIMEOUT):
-    """网络请求放在可终止的子进程中，缓慢响应或 DNS 不能无限占用推送时间。"""
+    """网络请求放在可终止的子进程中，缓慢响应或 DNS 不能无限占用推送时间。
+
+    network_worker 不可用时降级为进程内直接发送：仍有 socket 超时，但失去强制终止能力。
+    这条路径只在工作流本身已损坏时使用，优先保证提醒能发出。
+    """
+    network_worker = _load_worker()
+    if network_worker is None:
+        print("网络子进程模块不可用，改为进程内直接发送推送。", file=sys.stderr)
+        _post_once(payload, timeout=min(20, timeout))
+        return
     reply = network_worker.run("push", {
         "url": PUSHPLUS_URL, "payload": payload,
         "socket_timeout": min(20, timeout),
@@ -113,8 +130,7 @@ def send(lines, title=DEFAULT_TITLE, retries=NOTIFY_RETRIES, sleep=None):
             break
         except Exception:
             break
-        if time.monotonic() >= deadline:
-            break
+        # post_once 正常返回即 PushPlus 已接受；即使恰好越过预算也不丢弃，否则会误报失败或引发重复推送。
         print("PushPlus 已接受通知请求（不代表手机已送达）。")
         return True
     print("PushPlus 通知未确认：请检查 Token、额度、网络或超时；签到失败状态保留。", file=sys.stderr)
