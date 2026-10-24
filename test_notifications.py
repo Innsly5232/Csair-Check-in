@@ -79,7 +79,7 @@ class Notifications(unittest.TestCase):
         self.assertNotIn('Cookie', request.headers)
         self.assertNotIn('private-token', out.getvalue())
 
-    def test_notification_errors_are_redacted_and_not_retried(self):
+    def test_notification_errors_are_redacted_and_rejections_not_retried(self):
         for raw in (b'{"code":400,"msg":"private-token"}', b'not json', b'[]',
                     b'{"code":200,"data":[{"code":400}]}', b'x'*65537):
             response = MagicMock()
@@ -92,8 +92,10 @@ class Notifications(unittest.TestCase):
                 self.assertFalse(m.notify_failures(['失败']))
             self.assertNotIn('private-token', out.getvalue())
             opener.open.assert_called_once()
-        with patch.dict(os.environ, {'PUSHPLUS_TOKEN': 'private-token'}), patch.object(m.urllib.request, 'build_opener', side_effect=TimeoutError('private-token')), contextlib.redirect_stderr(io.StringIO()) as out:
+        # 网络层异常属于可重试：共 1 次 + 2 次重试，输出不含 Token。
+        with patch.dict(os.environ, {'PUSHPLUS_TOKEN': 'private-token'}), patch.object(m.pushplus.time, 'sleep'), patch.object(m.urllib.request, 'build_opener', side_effect=TimeoutError('private-token')) as connect, contextlib.redirect_stderr(io.StringIO()) as out:
             self.assertFalse(m.notify_failures(['失败']))
+            self.assertEqual(connect.call_count, 3)
             self.assertNotIn('private-token', out.getvalue())
 
     def test_missing_token_or_no_failures_do_not_connect(self):

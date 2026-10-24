@@ -11,8 +11,8 @@ GitHub 使用 CSAIR_COOKIE_159 / 157 / 185 / 183，后缀即账号标识；无�
 独立 Secret 存在时优先读取；CSAIR_REQUIRED_ACCOUNTS 指定必需账号，空值报错。
 单个账号配置错误不阻止其他有效账号；失败统一汇总并返回非零退出码。
 以下为本地旧版兼容方式。cookies.txt：每行一个完整 Cookie，支持 Cookie: 前缀、UTF-8 BOM 和 # 注释。
-优先级：显式 --cookies > CSAIR_COOKIES 环境变量（多行）> cookies.txt
-        > CONFIG_COOKIES（仅当 cookies.txt 不存在）。空文件不会回退旧账号。
+优先级：显式 --cookies > CSAIR_COOKIES 环境变量（多行）> cookies.txt。
+代码内不再保存 Cookie（已移除 CONFIG_COOKIES）；空文件不会回退到其他来源。
 接口、请求体和客户端标识沿用原版，未独立验证当前接口业务协议。
 仅明确的签到成功/已签到文字被视为完成；通用 success 不作为签到成功。
 仅建连超时自动重试，读超时/断连/5xx 均视为结果不确定，不自动重发 POST。
@@ -20,6 +20,8 @@ GitHub 使用 CSAIR_COOKIE_159 / 157 / 185 / 183，后缀即账号标识；无�
 日志仅保留固定诊断，不输出 Cookie、原始服务器消息、响应体或异常文本。
 真实运行结束后发送全部账号结果，成功/已签到也通知；仅检查不推送。
 日志以北京时间记录，1 MiB 滚动，保留 3 份备份；每个账号立即写入。
+CSAIR_PUBLIC_LOG=1（工作流已设置）时，控制台只输出账号数量和各状态计数；逐账号明细只写入日志文件，
+并通过 PushPlus 发送。公开仓库的 Actions 日志任何人可见，所以不在其中显示逐账号结果。
 本地锁防止使用同一 Cookie 路径的任务同时运行（不提供每日完成缓存）。
 退出码：0=全部完成或本地检查通过；1=有失败/未确认；2=配置/文件错误；
         3=同一配置正在运行；130=用户中断。
@@ -42,11 +44,13 @@ import re
 import sys
 import time
 
+import pushplus
+from pushplus import NoRedirect  # noqa: F401  # 保留旧名称，测试和外部引用仍可用 csair_daily_sign.NoRedirect
+
 BASE_DIR = Path(__file__).resolve().parent
 COOKIE_FILE = BASE_DIR / "cookies.txt"
 LOG_FILE = BASE_DIR / "sign_log.txt"
 ACCOUNT_IDS = ("159", "157", "185", "183")
-CONFIG_COOKIES = []  # 兼容旧版；建议把凭证放在 cookies.txt
 SLEEP_MIN, SLEEP_MAX = 3, 8
 MAX_RETRY = 2
 CHINA_TZ = dt.timezone(dt.timedelta(hours=8))
@@ -132,7 +136,7 @@ def load_cookies(path=COOKIE_FILE, explicit=False, errors=None):
     elif path.exists():
         lines = path.read_text(encoding="utf-8-sig").splitlines()
     else:
-        lines = CONFIG_COOKIES
+        lines = []  # 凭证只能来自 Secret/环境变量或 cookies.txt，不允许写进代码
     names = os.environ.get("CSAIR_ACCOUNT_NAMES", "").splitlines()
     if names and len(names) != len(lines):
         raise ValueError("CSAIR_ACCOUNT_NAMES 与 Cookie 行数不一致，请逐行对应（含空行或注释行）")
@@ -293,6 +297,9 @@ def make_logger(path):
     file_handler.setFormatter(ChinaFormatter("%(asctime)s %(message)s"))
     console = logging.StreamHandler(sys.stdout)
     console.setFormatter(logging.Formatter("%(message)s"))
+    if os.environ.get("CSAIR_PUBLIC_LOG") == "1":
+        # 公开日志只保留标记为 public 的统计行；逐账号明细仍写入日志文件。
+        console.addFilter(lambda record: getattr(record, "public", False))
     logger.addHandler(file_handler)
     logger.addHandler(console)
     return logger
@@ -320,45 +327,9 @@ def parse_args(argv=None):
     return args
 
 
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
 def notify_failures(failures, title="南航签到异常提醒"):
-    """只发送固定诊断和用户备注；独立连接，不带南航 Cookie，不重试。"""
-    if not failures:
-        return True
-    token = os.environ.get("PUSHPLUS_TOKEN", "").strip()
-    if not token:
-        print("PushPlus 未配置：请添加 PUSHPLUS_TOKEN Secret，失败通知未发送。", file=sys.stderr)
-        return False
-    content = "时间：" + dt.datetime.now(CHINA_TZ).strftime("%Y-%m-%d %H:%M:%S +0800")
-    content += "\n\n" + "\n\n".join(failures)
-    content += "\n\nCookie 失效请更新对应账号的 CSAIR_COOKIE_数字 Secret；结果不确定请先在南航 App 核对。"
-    payload = {"token": token, "title": title, "content": content,
-               "template": "txt", "channel": "cmcc"}
-    try:
-        request = urllib.request.Request("https://www.pushplus.plus/send",
-                  data=json.dumps(payload).encode("utf-8"),
-                  headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.build_opener(NoRedirect()).open(request, timeout=20) as response:
-            raw = response.read(65537)
-            if response.status != 200 or len(raw) > 65536:
-                raise ValueError("invalid response")
-            data = json.loads(raw)
-            if not isinstance(data, dict) or data.get("code") != 200:
-                raise ValueError("rejected")
-            channels = data.get("data")
-            if isinstance(channels, list) and any(
-                not isinstance(item, dict) or item.get("code") != 200 for item in channels
-            ):
-                raise ValueError("channel rejected")
-        print("PushPlus 已接受通知请求（不代表手机已送达）。")
-        return True
-    except Exception:
-        print("PushPlus 通知未确认：请检查 Token、额度或网络；签到失败状态保留。", file=sys.stderr)
-        return False
+    """发送合并通知；实现见 pushplus.py（仅标准库，网络异常/5xx 最多重试 2 次）。"""
+    return pushplus.send(failures, title)
 
 
 def run_accounts(args, failures, notices):
@@ -388,7 +359,8 @@ def run_accounts(args, failures, notices):
             return 2
         with run_lock(cookie_path.with_name(cookie_path.name + ".lock")):
             logger = make_logger(args.log.expanduser().resolve())
-            logger.info("===== 共 %d 个账号；移除 %d 条精确重复项 =====", len(accounts), duplicates)
+            logger.info("===== 共 %d 个账号；移除 %d 条精确重复项 =====", len(accounts), duplicates,
+                        extra={"public": True})
             counts = Counter()
             for index, account in enumerate(accounts):
                 try:
@@ -404,7 +376,8 @@ def run_accounts(args, failures, notices):
                 logger.info("%s：%s｜%s｜请求 %d 次", account.label, result.status, result.detail, result.attempts)
                 if index + 1 < len(accounts):
                     time.sleep(random.uniform(args.sleep_min, args.sleep_max))
-            logger.info("汇总：%s", "；".join(f"{key} {value}" for key, value in counts.items()))
+            logger.info("汇总：%s", "；".join(f"{key} {value}" for key, value in counts.items()),
+                        extra={"public": True})
             return 0 if not failures and counts["签到成功"] + counts["今日已签"] == len(accounts) else 1
     except AlreadyRunning:
         failures.append("任务未执行：同一配置已有签到任务正在运行。")

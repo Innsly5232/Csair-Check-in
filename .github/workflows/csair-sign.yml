@@ -19,6 +19,8 @@ on:
 env:
   CSAIR_REQUIRED_ACCOUNTS: "159,157,185"
   CSAIR_REQUIRE_PUSHPLUS: "1"
+  # 仓库公开，Actions 日志任何人可见：控制台只显示账号数和各状态计数。
+  CSAIR_PUBLIC_LOG: "1"
 
 permissions:
   contents: read
@@ -65,16 +67,27 @@ jobs:
           CSAIR_COOKIE_185: ${{ secrets.CSAIR_COOKIE_185 }}
           CSAIR_COOKIE_183: ${{ secrets.CSAIR_COOKIE_183 }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-        run: python csair_daily_sign.py
+        run: |
+          # 8 分钟上限远低于 15 分钟的 job 超时，超时后仍有时间发提醒。
+          code=0
+          timeout -k 20 480 python csair_daily_sign.py || code=$?
+          if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
+            echo '签到超过 8 分钟被终止。' >&2
+            python3 pushplus.py '签到超时：运行超过 8 分钟被终止，部分账号结果不确定，请在南航 App 核对。' || true
+          fi
+          exit "$code"
       - name: 签到前步骤失败提醒
         if: ${{ failure() && steps.sign.outcome == 'skipped' && (github.event_name == 'schedule' || (!inputs.check_only && !inputs.test_pushplus)) }}
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-        run: |
-          python - <<'PYTHON'
-          from csair_daily_sign import notify_failures
-          raise SystemExit(0 if notify_failures(["签到未开始：依赖安装、Python 初始化或离线测试失败，请查看 Actions 步骤日志。"]) else 1)
-          PYTHON
+        # 只依赖独立的标准库脚本和系统 python3，主脚本或 setup-python 出问题时也能发出。
+        run: python3 pushplus.py '签到未开始：依赖安装、Python 初始化或离线测试失败，请查看 Actions 步骤日志。'
+      - name: 取消或超时提醒
+        if: ${{ cancelled() && (github.event_name == 'schedule' || (!inputs.check_only && !inputs.test_pushplus)) }}
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        # 尽力而为：若在签到过程中被取消，主脚本也会自行发一条中断提醒，可能收到两条。
+        run: python3 pushplus.py '签到任务被取消或整体超时，签到状态未知，请在南航 App 核对。' || true
       - name: 写入运行摘要
         if: always()
         env:
@@ -86,9 +99,10 @@ jobs:
           elif [ "$CHECK_ONLY" = 'true' ]; then
             echo '本次为仅检查模式，不提交签到；检查结果请查看步骤日志。' >> "$GITHUB_STEP_SUMMARY"
           elif [ -f sign_log.txt ]; then
-            echo '### 签到结果' >> "$GITHUB_STEP_SUMMARY"
+            # 仓库公开：摘要只写统计行，不含逐账号结果；明细见 PushPlus 通知。
+            echo '### 签到结果（仅统计，明细见 PushPlus 通知）' >> "$GITHUB_STEP_SUMMARY"
             echo '```text' >> "$GITHUB_STEP_SUMMARY"
-            cat sign_log.txt >> "$GITHUB_STEP_SUMMARY"
+            grep -E '=====|汇总：' sign_log.txt >> "$GITHUB_STEP_SUMMARY" || true
             echo '```' >> "$GITHUB_STEP_SUMMARY"
           else
             echo '未生成签到结果，请检查前面步骤的错误。' >> "$GITHUB_STEP_SUMMARY"
