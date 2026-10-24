@@ -126,21 +126,39 @@ class Tests(unittest.TestCase):
                 self.assertEqual((result.status, session.post.call_count), ('结果不确定', 1))
 
     def test_slow_body_hits_time_budget(self):
-        # 服务端极慢逐字节返回：单次 read 不超时，但总读取时长超限应中止且不重发。
-        # 假时钟：deadline 计算时为 0，读到第二个 chunk 时跳过上限。
-        ticks = {'n': 0}
-        def fake_monotonic():
-            ticks['n'] += 1
-            return 0 if ticks['n'] <= 2 else m.ACCOUNT_TIME_BUDGET + 10 ** 6
-        class Slow(Response):
+        # 真实阻塞复现：服务端在 next() 中逐块阻塞，单次 read 不超时，迭代器也不主动结束。
+        # 后台线程读取 + 主线程限时等待，应在预算内主动中断、关闭响应、且不重发 POST。
+        import time as _time
+        closed = {'n': 0}
+        class Blocking(Response):
+            def __init__(self):
+                super().__init__(data={})
+            def close(self):
+                closed['n'] += 1
             def iter_content(self, **kw):
-                yield b'{"respMsg"'
-                yield b':"x"}'
-        with patch.object(m.time, 'monotonic', side_effect=fake_monotonic):
-            result, session = self.invoke([Slow(data={})])
+                for _ in range(50):
+                    _time.sleep(0.05)  # 阻塞发生在 next() 内部，检查无法在循环体执行
+                    yield b'x'
+        start = _time.monotonic()
+        with patch.object(m, 'ACCOUNT_TIME_BUDGET', 0.2):
+            result, session = self.invoke([Blocking()], connect_timeout=0.01, read_timeout=0.01)
+        elapsed = _time.monotonic() - start
         self.assertEqual(result.status, '结果不确定')
         self.assertIn('时间上限', result.detail)
         self.assertEqual(session.post.call_count, 1)
+        self.assertLess(elapsed, 1.0)        # 远小于迭代器自然结束所需的 ~2.5s
+        self.assertGreaterEqual(closed['n'], 1)  # 超时后主动关闭响应打断 socket
+
+    def test_read_error_is_uncertain_not_retried(self):
+        # 读取响应体阶段抛异常（请求体已发出）：归为结果不确定，不重发，诊断只含类名。
+        class Broken(Response):
+            def iter_content(self, **kw):
+                raise requests.exceptions.ChunkedEncodingError('sid=secret')
+                yield b''  # pragma: no cover
+        result, session = self.invoke([Broken(data={})])
+        self.assertEqual((result.status, session.post.call_count), ('结果不确定', 1))
+        self.assertIn('ChunkedEncodingError', result.detail)
+        self.assertNotIn('secret', result.detail)
 
     def test_bad_json_and_size(self):
         for raw in (b'<html>secret</html>', b'\xff', b'x'*(m.MAX_RESPONSE_BYTES+1)):

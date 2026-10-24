@@ -17,7 +17,8 @@ GitHub 使用 CSAIR_COOKIE_159 / 157 / 185 / 183，后缀即账号标识；无�
 仅明确的签到成功/已签到文字被视为完成；通用 success 不作为签到成功。
 仅请求体肯定未发出的情况自动重试：建连超时，以及连接建立前失败（DNS 解析失败、连接被拒绝，
 凭异常链中的 urllib3 类名识别）。读超时、连接后断开、5xx 均视为结果不确定，不自动重发 POST。
-单账号读取响应另有总时长上限，防止服务端极慢返回时单次读超时无法触发。
+单账号读取响应另有总时长上限，在后台线程中读取、主线程限时等待，服务端逐字节阻塞导致单次
+读超时不触发时也能主动中断并关闭连接；超时按结果不确定处理，不重发。
 无状态查询、自动登录、积分查询、定时调度或验证码处理功能。
 日志仅保留固定诊断，不输出 Cookie、原始服务器消息、响应体或异常文本。
 真实运行结束后发送全部账号结果，成功/已签到也通知；仅检查不推送。
@@ -44,6 +45,7 @@ from pathlib import Path
 import random
 import re
 import sys
+import threading
 import time
 
 import pushplus
@@ -219,6 +221,49 @@ def connection_never_sent(exc):
     return False
 
 
+class _ReadOutcome:
+    """read_body_within 的结果：body 读满、超大、读取异常，或超时未完成之一。"""
+    __slots__ = ("body", "oversize", "error", "timed_out")
+
+    def __init__(self):
+        self.body = None
+        self.oversize = False
+        self.error = None
+        self.timed_out = False
+
+
+def read_body_within(response, max_bytes, timeout):
+    """在后台线程中有界读取响应体，主线程最多等待 timeout 秒。
+
+    若超时仍未读完，主动关闭响应打断底层 socket 并返回 timed_out；不依赖迭代器配合，
+    因此服务端逐字节阻塞时也能及时中止。后台线程为守护线程，不会阻塞进程退出。
+    """
+    outcome = _ReadOutcome()
+
+    def worker():
+        body = bytearray()
+        try:
+            for chunk in response.iter_content(chunk_size=8192):
+                body.extend(chunk)
+                if len(body) > max_bytes:
+                    outcome.oversize = True
+                    return
+            outcome.body = bytes(body)
+        except Exception as exc:  # 读超时、断连等；回传由调用方按“结果不确定”归类
+            outcome.error = exc
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    thread.join(timeout if timeout and timeout > 0 else 0)
+    if thread.is_alive():
+        outcome.timed_out = True
+        try:
+            response.close()  # 打断阻塞的 socket 读取，让后台线程尽快结束
+        except Exception:
+            pass
+    return outcome
+
+
 def sign_one(cookie, requests_module, connect_timeout=10, read_timeout=20,
              retries=MAX_RETRY, ignore_proxy=False, sleep=time.sleep):
     """各账号独立 Session；自动重试仅限请求体肯定未发出的情况（ConnectTimeout 及连接建立前失败）。"""
@@ -247,17 +292,19 @@ def sign_one(cookie, requests_module, connect_timeout=10, read_timeout=20,
                         return Result("结果不确定", f"HTTP {code}：服务端异常，请在 App 核对", attempt)
                     if not 200 <= code < 300:
                         return Result("请求失败", f"HTTP {code}：请求未成功", attempt)
-                    # 有界读取，避免错误页面或异常响应无限占用内存；并限制总读取时长，
-                    # 防止服务端极慢地逐字节返回时单个 read 超时无法触发。
-                    body = bytearray()
-                    for chunk in response.iter_content(chunk_size=8192):
-                        body.extend(chunk)
-                        if len(body) > MAX_RESPONSE_BYTES:
-                            return Result("结果不确定", "响应超过 1 MiB，停止读取，请在 App 核对", attempt)
-                        if time.monotonic() > deadline:
-                            return Result("结果不确定", "读取响应超过时间上限，可能已提交；请在 App 核对，本次不重发", attempt)
+                    # 有界读取，避免错误页面或异常响应无限占用内存；并在后台线程中限制总读取
+                    # 时长，服务端逐字节阻塞（单次 read 超时不触发）时也能主动中断。
+                    outcome = read_body_within(response, MAX_RESPONSE_BYTES, deadline - time.monotonic())
+                    if outcome.timed_out:
+                        return Result("结果不确定", "读取响应超过时间上限，可能已提交；请在 App 核对，本次不重发", attempt)
+                    if outcome.oversize:
+                        return Result("结果不确定", "响应超过 1 MiB，停止读取，请在 App 核对", attempt)
+                    if outcome.error is not None:
+                        # 读取阶段的异常：请求体已发出，无法确认是否已提交，不重发。
+                        return Result("结果不确定",
+                                      f"读取响应时网络异常（{type(outcome.error).__name__}），可能已提交；请在 App 核对，本次不重发", attempt)
                     try:
-                        data = json.loads(bytes(body))
+                        data = json.loads(outcome.body)
                     except (ValueError, UnicodeError, RecursionError):
                         return Result("结果不确定", "返回非有效 JSON，请在 App 核对是否已签到", attempt)
                     result = classify_response(data)
