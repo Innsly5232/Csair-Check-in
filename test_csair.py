@@ -38,7 +38,7 @@ class Tests(unittest.TestCase):
         session.__exit__ = Mock(return_value=False)
         session.post.side_effect = responses
         with patch.object(requests, 'Session', return_value=session):
-            result = m.sign_one('sid=secret', requests, sleep=lambda _: None, **kw)
+            result = m._sign_one('sid=secret', requests, sleep=lambda _: None, **kw)
         return result, session
 
     def test_classification(self):
@@ -248,7 +248,7 @@ class Tests(unittest.TestCase):
         with patch.object(m, 'SIGN_URL', f'http://127.0.0.1:{port}/'), \
              patch.object(m, 'ACCOUNT_TIME_BUDGET', budget), \
              patch.object(m, 'close_async', side_effect=delayed_close_async):
-            result = m.sign_one('sid=x', real_requests, connect_timeout=connect_timeout,
+            result = m._sign_one('sid=x', real_requests, connect_timeout=connect_timeout,
                                 read_timeout=read_timeout, retries=0, sleep=lambda _: None)
         elapsed = time.monotonic() - start
         stop.set()
@@ -299,3 +299,4 @@ class Tests(unittest.TestCase):
             self.assertEqual(exc.exception.code,2)
 
 if __name__ == '__main__': unittest.main(verbosity=2)
+

@@ -17,7 +17,7 @@ on:
         required: true
 
 env:
-  CSAIR_REQUIRED_ACCOUNTS: "159,157,185"
+  CSAIR_REQUIRED_ACCOUNTS: "159,157,185,183"
   CSAIR_REQUIRE_PUSHPLUS: "1"
   # 仓库公开，Actions 日志任何人可见：控制台只显示账号数和各状态计数。
   CSAIR_PUBLIC_LOG: "1"
@@ -107,3 +107,4 @@ jobs:
           else
             echo '未生成签到结果，请检查前面步骤的错误。' >> "$GITHUB_STEP_SUMMARY"
           fi
+

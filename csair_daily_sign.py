@@ -17,8 +17,8 @@ GitHub 使用 CSAIR_COOKIE_159 / 157 / 185 / 183，后缀即账号标识；无�
 仅明确的签到成功/已签到文字被视为完成；通用 success 不作为签到成功。
 仅请求体肯定未发出的情况自动重试：建连超时，以及连接建立前失败（DNS 解析失败、连接被拒绝，
 凭异常链中的 urllib3 类名识别）。读超时、连接后断开、5xx 均视为结果不确定，不自动重发 POST。
-单账号读取响应另有总时长上限，在后台线程中读取、主线程限时等待，服务端逐字节阻塞导致单次
-读超时不触发时也能主动中断并关闭连接；超时按结果不确定处理，不重发。
+每账号在独立网络子进程中执行，默认 60 秒总时限覆盖启动、DNS、连接、重试、响应头和响应体。
+超时结束子进程并继续其他账号，按结果不确定处理，不重发；凭证仅经管道传递，不落盘。
 无状态查询、自动登录、积分查询、定时调度或验证码处理功能。
 日志仅保留固定诊断，不输出 Cookie、原始服务器消息、响应体或异常文本。
 真实运行结束后发送全部账号结果，成功/已签到也通知；仅检查不推送。
@@ -49,6 +49,7 @@ import threading
 import time
 
 import pushplus
+import network_worker
 from pushplus import NoRedirect  # noqa: F401  # 保留旧名称，测试和外部引用仍可用 csair_daily_sign.NoRedirect
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -57,7 +58,7 @@ LOG_FILE = BASE_DIR / "sign_log.txt"
 ACCOUNT_IDS = ("159", "157", "185", "183")
 SLEEP_MIN, SLEEP_MAX = 3, 8
 MAX_RETRY = 2
-ACCOUNT_TIME_BUDGET = 30  # 单账号读取响应的额外时长上限（秒），叠加在连接/读超时之上
+ACCOUNT_TIME_BUDGET = 30  # 总时限 = connect_timeout + read_timeout + 此额外预算（默认共 60 秒）
 CHINA_TZ = dt.timezone(dt.timedelta(hours=8))
 MAX_RESPONSE_BYTES = 1024 * 1024
 SIGN_URL = "https://wxapi.csair.com/marketing-tools/activity/join?type=APPTYPE&chanel=ss&lang=zh"
@@ -88,7 +89,7 @@ class Account:
 class Result:
     status: str
     detail: str
-    attempts: int = 1
+    attempts: int | None = 1
 
     @property
     def ok(self):
@@ -278,7 +279,26 @@ def close_async(response):
     threading.Thread(target=worker, daemon=True).start()
 
 
-def sign_one(cookie, requests_module, connect_timeout=10, read_timeout=20,
+def sign_one(cookie, connect_timeout=10, read_timeout=20,
+             retries=MAX_RETRY, ignore_proxy=False):
+    """整个账号的网络阶段受父进程限时控制；超时杀掉子进程，不重发本次签到。"""
+    reply = network_worker.run("sign", {
+        "cookie": cookie, "url": SIGN_URL,
+        "connect_timeout": connect_timeout, "read_timeout": read_timeout,
+        "retries": retries, "ignore_proxy": ignore_proxy,
+        "extra_budget": ACCOUNT_TIME_BUDGET,
+    }, timeout=connect_timeout + read_timeout + ACCOUNT_TIME_BUDGET)
+    if reply["state"] == "timeout":
+        return Result("结果不确定", "账号网络处理超过总时间上限，可能已提交；请在 App 核对，本次不重发", None)
+    if reply["state"] == "ok":
+        value = reply.get("result")
+        if (isinstance(value, dict) and isinstance(value.get("status"), str)
+                and isinstance(value.get("detail"), str) and isinstance(value.get("attempts"), int)):
+            return Result(value["status"], value["detail"], value["attempts"])
+    return Result("结果不确定", "账号网络子进程未正常完成，可能已提交；请在 App 核对，本次不重发", None)
+
+
+def _sign_one(cookie, requests_module, connect_timeout=10, read_timeout=20,
              retries=MAX_RETRY, ignore_proxy=False, sleep=time.sleep):
     """各账号独立 Session；自动重试仅限请求体肯定未发出的情况（ConnectTimeout 及连接建立前失败）。"""
     req = requests_module
@@ -459,7 +479,7 @@ def run_accounts(args, failures, notices):
             counts = Counter()
             for index, account in enumerate(accounts):
                 try:
-                    result = sign_one(account.cookie, requests, args.connect_timeout, args.read_timeout,
+                    result = sign_one(account.cookie, args.connect_timeout, args.read_timeout,
                                       args.retries, args.no_proxy)
                 except Exception as exc:
                     # 只记异常类名用于排查，不记异常内容（可能含 Cookie 或响应原文）。
@@ -470,7 +490,8 @@ def run_accounts(args, failures, notices):
                 if not result.ok:
                     failures.append(notice)
                 counts[result.status] += 1
-                logger.info("%s：%s｜%s｜请求 %d 次", account.label, result.status, result.detail, result.attempts)
+                attempt_text = f"请求 {result.attempts} 次" if result.attempts is not None else "请求次数未确认"
+                logger.info("%s：%s｜%s｜%s", account.label, result.status, result.detail, attempt_text)
                 if index + 1 < len(accounts):
                     time.sleep(random.uniform(args.sleep_min, args.sleep_max))
             logger.info("汇总：%s", "；".join(f"{key} {value}" for key, value in counts.items()),
@@ -522,3 +543,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     sys.exit(main())
+
