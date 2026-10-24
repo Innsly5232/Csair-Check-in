@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # coding: utf-8
-"""南航自动签到 v2.0（无推送，Python 3.10+）
+"""南航自动签到 v2.1（PushPlus 失败通知，Python 3.10+）
 
 安装：python3 -m pip install requests
 检查：python3 csair_daily_sign.py --check   # 只检查本地配置，不联网
@@ -27,6 +27,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import datetime as dt
 import logging
+import json
+import urllib.request
 from logging.handlers import RotatingFileHandler
 import math
 import os
@@ -94,6 +96,12 @@ def load_cookies(path=COOKIE_FILE, explicit=False):
         lines = path.read_text(encoding="utf-8-sig").splitlines()
     else:
         lines = CONFIG_COOKIES
+    names = os.environ.get("CSAIR_ACCOUNT_NAMES", "").splitlines()
+    if names and len(names) != len(lines):
+        raise ValueError("CSAIR_ACCOUNT_NAMES 与 Cookie 行数不一致，请逐行对应（含空行或注释行）")
+    for name in names:
+        if len(name) > 40 or any(ord(c) < 32 for c in name) or any(c in name for c in "=;<>`"):
+            raise ValueError("账号备注须为不超过 40 字的普通文字，不能填写 Cookie")
     accounts, seen, duplicates = [], set(), 0
     for number, raw in enumerate(lines, 1):
         cookie = raw.strip().lstrip("\ufeff")
@@ -109,9 +117,11 @@ def load_cookies(path=COOKIE_FILE, explicit=False):
             duplicates += 1
             continue
         seen.add(cookie)
-        accounts.append(Account(f"配置行{number}", cookie))
+        name = names[number - 1].strip() if names else ""
+        label = f"{name}（配置行{number}）" if name else f"配置行{number}"
+        accounts.append(Account(label, cookie))
     if not accounts:
-        raise ValueError("没有有效账号：请在脚本同目录的 cookies.txt 每行填写一个 Cookie")
+        raise ValueError("没有有效账号：请在 CSAIR_COOKIES Secret 中每行填写一个 Cookie")
     return accounts, duplicates
 
 
@@ -265,10 +275,52 @@ def parse_args(argv=None):
     return args
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def notify_failures(failures):
+    """只发送固定诊断和用户备注；独立连接，不带南航 Cookie，不重试。"""
+    if not failures:
+        return True
+    token = os.environ.get("PUSHPLUS_TOKEN", "").strip()
+    if not token:
+        print("PushPlus 未配置：请添加 PUSHPLUS_TOKEN Secret，失败通知未发送。", file=sys.stderr)
+        return False
+    content = "时间：" + dt.datetime.now(CHINA_TZ).strftime("%Y-%m-%d %H:%M:%S +0800")
+    content += "\n\n" + "\n\n".join(failures)
+    content += "\n\nCookie 失效请更新 CSAIR_COOKIES；结果不确定请先在南航 App 核对。"
+    payload = {"token": token, "title": "南航签到失败提醒", "content": content,
+               "template": "txt", "channel": "wechat"}
+    try:
+        request = urllib.request.Request("https://www.pushplus.plus/send",
+                  data=json.dumps(payload).encode("utf-8"),
+                  headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.build_opener(NoRedirect()).open(request, timeout=20) as response:
+            raw = response.read(65537)
+            if response.status != 200 or len(raw) > 65536:
+                raise ValueError("invalid response")
+            data = json.loads(raw)
+            if not isinstance(data, dict) or data.get("code") != 200:
+                raise ValueError("rejected")
+            channels = data.get("data")
+            if isinstance(channels, list) and any(
+                not isinstance(item, dict) or item.get("code") != 200 for item in channels
+            ):
+                raise ValueError("channel rejected")
+        print("PushPlus 已接受通知请求（不代表微信已送达）。")
+        return True
+    except Exception:
+        print("PushPlus 通知未确认：请检查 Token、额度或网络；签到失败状态保留。", file=sys.stderr)
+        return False
+
+
 def main(argv=None):
     args = parse_args(argv)
     cookie_path = (args.cookies or COOKIE_FILE).expanduser().resolve()
     logger = None
+    failures = []
     try:
         accounts, duplicates = load_cookies(cookie_path, explicit=args.cookies is not None)
         if args.check:
@@ -277,6 +329,7 @@ def main(argv=None):
         try:
             import requests
         except ImportError:
+            failures.append("运行失败：缺少 requests 依赖，请查看 Actions 安装步骤。")
             print("缺少 requests：请运行 python3 -m pip install requests", file=sys.stderr)
             return 2
         with run_lock(cookie_path.with_name(cookie_path.name + ".lock")):
@@ -286,6 +339,8 @@ def main(argv=None):
             for index, account in enumerate(accounts):
                 result = sign_one(account.cookie, requests, args.connect_timeout, args.read_timeout,
                                   args.retries, args.no_proxy)
+                if not result.ok:
+                    failures.append(f"账号：{account.label}\n原因：{result.status}｜{result.detail}")
                 counts[result.status] += 1
                 logger.info("%s：%s｜%s｜请求 %d 次", account.label, result.status, result.detail, result.attempts)
                 if index + 1 < len(accounts):
@@ -293,18 +348,28 @@ def main(argv=None):
             logger.info("汇总：%s", "；".join(f"{key} {value}" for key, value in counts.items()))
             return 0 if counts["签到成功"] + counts["今日已签"] == len(accounts) else 1
     except AlreadyRunning:
+        failures.append("任务未执行：同一配置已有签到任务正在运行。")
         print("已有任务正在使用此 Cookie 配置，本次跳过。", file=sys.stderr)
         return 3
     except (OSError, UnicodeError):
+        failures.append("运行失败：配置、锁或日志文件读写失败，请检查路径、编码和权限。")
         print("配置、锁或日志文件读写失败：请检查路径、UTF-8 编码、权限和磁盘空间。", file=sys.stderr)
         return 2
     except ValueError as exc:
+        failures.append(f"配置错误：{exc}")
         print(f"配置错误：{exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
+        failures.append("任务中断：签到结果可能不确定，请在南航 App 核对。")
         print("已中断；正在提交的账号结果可能不确定，请在 App 核对。", file=sys.stderr)
         return 130
+    except Exception:
+        failures.append("运行失败：脚本发生未预期错误；本次可能未完成全部账号，请在 App 核对。")
+        print("脚本发生未预期错误，未输出原始异常以保护凭证。", file=sys.stderr)
+        return 1
     finally:
+        if failures and not args.check:
+            notify_failures(failures)
         if logger:
             for handler in logger.handlers[:]:
                 logger.removeHandler(handler)

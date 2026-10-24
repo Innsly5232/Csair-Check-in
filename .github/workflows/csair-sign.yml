@@ -33,21 +33,30 @@ jobs:
       - name: 安装依赖
         run: python -m pip install -r requirements.txt
       - name: 离线回归测试
-        run: python -m unittest -v test_csair.py
-      - name: 检查配置
+        run: python -m unittest discover -v
+      - name: 仅检查配置（不联网、不推送）
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.check_only }}
         env:
           CSAIR_COOKIES: ${{ secrets.CSAIR_COOKIES }}
-        run: |
-          if [ -z "$CSAIR_COOKIES" ]; then
-            echo '::error::请在仓库 Actions Secrets 中设置 CSAIR_COOKIES。'
-            exit 2
-          fi
-          python csair_daily_sign.py --check
-      - name: 提交签到
+          CSAIR_ACCOUNT_NAMES: ${{ secrets.CSAIR_ACCOUNT_NAMES }}
+        run: python csair_daily_sign.py --check
+      - name: 提交签到并通知失败
+        id: sign
         if: ${{ github.event_name == 'schedule' || !inputs.check_only }}
         env:
           CSAIR_COOKIES: ${{ secrets.CSAIR_COOKIES }}
+          CSAIR_ACCOUNT_NAMES: ${{ secrets.CSAIR_ACCOUNT_NAMES }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
         run: python csair_daily_sign.py
+      - name: 签到前步骤失败提醒
+        if: ${{ failure() && steps.sign.outcome == 'skipped' && (github.event_name == 'schedule' || !inputs.check_only) }}
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        run: |
+          python - <<'PYTHON'
+          from csair_daily_sign import notify_failures
+          notify_failures(["签到未开始：依赖安装、Python 初始化或离线测试失败，请查看 Actions 步骤日志。"])
+          PYTHON
       - name: 写入运行摘要
         if: always()
         env:
