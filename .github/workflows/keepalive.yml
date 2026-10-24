@@ -1,0 +1,26 @@
+name: 定时任务保活
+
+on:
+  schedule:
+    - cron: '41 1 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: csair-keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: 距上次提交满 30 天时保活
+        env:
+          TARGET_BRANCH: ${{ github.event.repository.default_branch }}
+        run: bash scripts/keepalive.sh

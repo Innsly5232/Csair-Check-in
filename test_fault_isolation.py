@@ -72,3 +72,19 @@ class FaultIsolation(unittest.TestCase):
             self.assertFalse(settings['proxies'])
             self.assertFalse(session.trust_env)
             self.assertEqual(result.status,'Cookie 失效')
+
+    def test_success_notification_failure_fails_job_without_resigning(self):
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {'CSAIR_COOKIE_159':'sid=a'}), patch.object(m,'sign_one',return_value=m.Result('签到成功','ok')) as sign, patch.object(m,'notify_failures',return_value=False) as notify, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(m.main(['--log',str(Path(d)/'log.txt')]),1)
+            sign.assert_called_once()
+            notify.assert_called_once()
+            self.assertEqual(notify.call_args.kwargs['title'],'南航签到完成')
+
+    def test_all_signed_accounts_send_one_summary(self):
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {'CSAIR_COOKIE_159':'sid=a','CSAIR_COOKIE_183':'sid=b'}), patch.object(m,'sign_one',return_value=m.Result('今日已签','ok')), patch.object(m,'notify_failures',return_value=True) as notify, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(m.main(['--log',str(Path(d)/'log.txt'),'--sleep-min','0','--sleep-max','0']),0)
+            notify.assert_called_once()
+            content='\n'.join(notify.call_args.args[0])
+            self.assertIn('159',content)
+            self.assertIn('183',content)
+            self.assertIn('今日已签',content)

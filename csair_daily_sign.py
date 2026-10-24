@@ -18,6 +18,7 @@ GitHub 使用 CSAIR_COOKIE_159 / 157 / 185 / 183，后缀即账号标识；无�
 仅建连超时自动重试，读超时/断连/5xx 均视为结果不确定，不自动重发 POST。
 无状态查询、自动登录、积分查询、定时调度或验证码处理功能。
 日志仅保留固定诊断，不输出 Cookie、原始服务器消息、响应体或异常文本。
+真实运行结束后发送全部账号结果，成功/已签到也通知；仅检查不推送。
 日志以北京时间记录，1 MiB 滚动，保留 3 份备份；每个账号立即写入。
 本地锁防止使用同一 Cookie 路径的任务同时运行（不提供每日完成缓存）。
 退出码：0=全部完成或本地检查通过；1=有失败/未确认；2=配置/文件错误；
@@ -324,7 +325,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def notify_failures(failures, title="南航签到失败提醒"):
+def notify_failures(failures, title="南航签到异常提醒"):
     """只发送固定诊断和用户备注；独立连接，不带南航 Cookie，不重试。"""
     if not failures:
         return True
@@ -360,14 +361,9 @@ def notify_failures(failures, title="南航签到失败提醒"):
         return False
 
 
-def main(argv=None):
-    args = parse_args(argv)
-    if args.test_pushplus:
-        return 0 if notify_failures(["这是一条主动推送测试消息，不代表签到失败；本次没有提交签到。"],
-                                    title="南航 PushPlus 推送测试") else 1
+def run_accounts(args, failures, notices):
     cookie_path = (args.cookies or COOKIE_FILE).expanduser().resolve()
     logger = None
-    failures = []
     try:
         config_errors = []
         accounts, duplicates = load_cookies(cookie_path, explicit=args.cookies is not None, errors=config_errors)
@@ -400,8 +396,10 @@ def main(argv=None):
                                       args.retries, args.no_proxy)
                 except Exception:
                     result = Result("结果不确定", "账号处理出现未预期错误，可能已提交；请在 App 核对，本次不重发")
+                notice = f"账号：{account.label}\n结果：{result.status}｜{result.detail}"
+                notices.append(notice)
                 if not result.ok:
-                    failures.append(f"账号：{account.label}\n原因：{result.status}｜{result.detail}")
+                    failures.append(notice)
                 counts[result.status] += 1
                 logger.info("%s：%s｜%s｜请求 %d 次", account.label, result.status, result.detail, result.attempts)
                 if index + 1 < len(accounts):
@@ -429,12 +427,27 @@ def main(argv=None):
         print("脚本发生未预期错误，未输出原始异常以保护凭证。", file=sys.stderr)
         return 1
     finally:
-        if failures and not args.check:
-            notify_failures(failures)
         if logger:
             for handler in logger.handlers[:]:
                 logger.removeHandler(handler)
                 handler.close()
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    if args.test_pushplus:
+        return 0 if notify_failures(["这是一条主动推送测试消息，本次没有提交签到。"],
+                                    title="南航 PushPlus 推送测试") else 1
+    failures, notices = [], []
+    code = run_accounts(args, failures, notices)
+    if not args.check and (notices or failures):
+        title = "南航签到完成" if code == 0 else "南航签到异常提醒"
+        # 同一次运行只发送一条，成功账号和失败原因一起汇总。
+        messages = list(dict.fromkeys(notices + failures))
+        accepted = notify_failures(messages, title=title)
+        if not accepted and code == 0:
+            return 1
+    return code
 
 
 if __name__ == "__main__":

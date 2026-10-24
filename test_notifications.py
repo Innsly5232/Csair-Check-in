@@ -29,7 +29,7 @@ class Notifications(unittest.TestCase):
                     m.load_cookies()
                 self.assertNotIn('secret', str(error.exception))
 
-    def test_batch_only_failed_accounts_and_success_silent(self):
+    def test_batch_includes_all_results_and_success_notifies(self):
         with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {
                 'CSAIR_COOKIES': 'sid=secret1\nsid=secret2\nsid=secret3',
                 'CSAIR_ACCOUNT_NAMES': '本人\n家人\n备用'}):
@@ -43,11 +43,13 @@ class Notifications(unittest.TestCase):
                 self.assertIn('家人', content)
                 self.assertIn('备用', content)
                 self.assertIn('HTTP 401', content)
-                self.assertNotIn('本人', content)
+                self.assertIn('本人', content)
                 self.assertNotIn('secret', content)
             with patch.object(m, 'sign_one', return_value=m.Result('签到成功', 'ok')), patch.object(m, 'notify_failures') as notify, contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(m.main(args), 0)
-                notify.assert_not_called()
+                notify.assert_called_once()
+                self.assertEqual(notify.call_args.kwargs['title'], '南航签到完成')
+                self.assertIn('本人', '\n'.join(notify.call_args.args[0]))
 
     def test_configuration_errors_notify_but_check_is_offline(self):
         for cookie in ('', 'invalid'):
