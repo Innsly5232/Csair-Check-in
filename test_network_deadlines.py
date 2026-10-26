@@ -33,7 +33,7 @@ class NetworkDeadlines(unittest.TestCase):
                 hits.append(cookie)
                 try:
                     slow = mode != 'batch' or 'slow' in cookie
-                    if mode in ('fast', 'reject', '5xx'):
+                    if mode in ('fast', 'reject', '5xx', 'unknown'):
                         slow = False
                     if slow and mode != 'body':
                         self.wfile.write(b'HTTP/1.1 200 OK\r\nX-Slow: ')
@@ -51,6 +51,9 @@ class NetworkDeadlines(unittest.TestCase):
                         # 同时适用于签到结果和 PushPlus 接受响应。
                         raw = json.dumps({'message': '签到成功',
                                           'code': 400 if mode == 'reject' else 200, 'data': []}).encode()
+                        if mode == 'unknown':
+                            raw = json.dumps({'respCode': '0000', 'respMsg': 'success',
+                                              'data': {'code': '00A2', 'message': 'private-response'}}).encode()
                         self.send_response(500 if mode == '5xx' else 200)
                         self.send_header('Content-Length', str(len(raw)))
                         self.end_headers()
@@ -95,6 +98,18 @@ class NetworkDeadlines(unittest.TestCase):
                                    retries=0, ignore_proxy=True)
         self.assertEqual((result.status, result.attempts), ('签到成功', 1))
         self.assertEqual(len(hits), 1)
+
+    def test_unknown_response_diagnostic_survives_real_network_child(self):
+        url, hits = self.server('unknown')
+        with patch.object(sign, 'SIGN_URL', url):
+            result = sign.sign_one('sid=synthetic', connect_timeout=1, read_timeout=1,
+                                   retries=2, ignore_proxy=True)
+        self.assertEqual((result.status, result.attempts), ('未知结果', 1))
+        self.assertFalse(result.ok)
+        self.assertIn('data.code=00A2', result.diagnostic)
+        self.assertIn('data.result=missing', result.diagnostic)
+        self.assertNotIn('private-response', result.diagnostic)
+        self.assertEqual(len(hits), 1, '未知结果不能触发重复签到')
 
     def test_timeout_account_does_not_block_next_account_or_summary(self):
         url, hits = self.server('batch')

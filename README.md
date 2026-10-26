@@ -60,6 +60,17 @@ PushPlus 接口文档：https://www.pushplus.plus/doc/guide/api.html
 - `--no-proxy` 已修正为关闭 Requests 的环境配置读取，包括环境代理；不绕过系统 TUN。
 - 离线测试不会访问南航或发送真实通知。
 
+### 未知结果的安全诊断
+
+接口返回可解析的 JSON、但无法确认签到结果时，私人 PushPlus 通知会附加“安全诊断”：
+仅显示固定字段（`respCode`、`code`、`success`、`respMsg`、`message`、`msg`、`result`、`data`）
+在顶层和 `data` 对象中的类型、缺失情况，以及经过格式限制的短业务码。例如
+`respCode=0000;data.code=00A2;data.result=missing;data.message=string`。
+业务码仅接受最多 6 位数字（可带负号），或已观察到的 `00A2` 风格；其他值隐藏。
+不复制消息正文、任意字段名、Cookie、Token 或完整响应，也不写入控制台、Actions 摘要或本地日志。
+此诊断不改变成功判定或重试策略；“未知结果”仍保留失败状态，不自动重发签到。
+若 App 已显示签到、通知仍为未知结果，可提供通知中的安全诊断以便核查识别规则。
+
 ## CMCC 新消息ClawBot 渠道
 
 推送明确指定 `channel: cmcc` 和 `template: txt`，接口为 `https://www.pushplus.plus/send`。继续使用 `PUSHPLUS_TOKEN`，不需要 `option`，无需增加手机号或 Channel API Key 的 GitHub Secret。

@@ -90,6 +90,7 @@ class Result:
     status: str
     detail: str
     attempts: int | None = 1
+    diagnostic: str = ""
 
     @property
     def ok(self):
@@ -172,10 +173,48 @@ def load_cookies(path=COOKIE_FILE, explicit=False, errors=None):
     return accounts, duplicates
 
 
+def response_diagnostic(data):
+    """仅返回固定字段的类型和受限业务码，不遍历任意字段或复制消息原文。"""
+    def kind(value):
+        if value is None:
+            return "null"
+        return {dict: "object", list: "array", str: "string", bool: "boolean",
+                int: "number", float: "number"}.get(type(value), "other")
+
+    parts = ["root=" + kind(data)]
+    if not isinstance(data, dict):
+        return ";".join(parts)
+    for prefix, obj in (("", data), ("data.", data.get("data"))):
+        if not isinstance(obj, dict):
+            continue
+        for key in ("respCode", "code", "success", "respMsg", "message", "msg", "result", "data"):
+            if key not in obj:
+                parts.append(prefix + key + "=missing")
+                continue
+            value = obj[key]
+            summary = kind(value)
+            # 不接受任意字符串业务码：仅短数字或已观察到的 00A2 风格。
+            if key in ("respCode", "code"):
+                if type(value) is int and -999999 <= value <= 999999:
+                    summary = str(value)
+                elif isinstance(value, str) and re.fullmatch(r"(?:-?[0-9]{1,6}|[0-9]{2}[A-Z][0-9])", value):
+                    summary = value
+                else:
+                    summary += "(redacted)"
+            elif key == "success" and type(value) is bool:
+                summary = "true" if value else "false"
+            parts.append(prefix + key + "=" + summary)
+    return ";".join(parts)
+
+
+def unknown_response(data, detail):
+    return Result("未知结果", detail, diagnostic=response_diagnostic(data))
+
+
 def classify_response(data):
     """保守解释原脚本使用的消息字段；未知业务码不自行猜测。"""
     if not isinstance(data, dict):
-        return Result("未知结果", "JSON 顶层不是对象，需核对接口响应格式")
+        return unknown_response(data, "JSON 顶层不是对象，需核对接口响应格式")
     messages = [data[k].strip() for k in ("respMsg", "message")
                 if isinstance(data.get(k), str) and data[k].strip()]
     # 实际签到 HAR 的 respMsg 为通用 success，明确业务结果位于 data.result。
@@ -194,14 +233,14 @@ def classify_response(data):
                              "fail", "error", "not signed", "not checked")):
         return Result("签到未完成", "接口消息含失败或未完成信息")
     if data.get("success") is False or (isinstance(nested, dict) and nested.get("success") is False):
-        return Result("未知结果", "响应 success=false，不能确认签到完成")
+        return unknown_response(data, "响应 success=false，不能确认签到完成")
     if any(s in msg for s in ("已签到", "已签过", "已经签到", "重复签到",
                              "今日已签", "今天已签", "already signed in", "already checked in")):
         return Result("今日已签", "接口消息提示今日已签到")
     if any(s in msg for s in ("签到成功", "sign-in successful", "check-in successful",
                              "sign in successful", "check in successful")):
         return Result("签到成功", "接口消息明确提示签到成功")
-    return Result("未知结果", "缺少明确的签到结果；请在南航 App 核对，未记录响应原文")
+    return unknown_response(data, "缺少明确的签到结果；请在南航 App 核对，未记录响应原文")
 
 
 def connection_never_sent(exc):
@@ -294,7 +333,9 @@ def sign_one(cookie, connect_timeout=10, read_timeout=20,
         value = reply.get("result")
         if (isinstance(value, dict) and isinstance(value.get("status"), str)
                 and isinstance(value.get("detail"), str) and isinstance(value.get("attempts"), int)):
-            return Result(value["status"], value["detail"], value["attempts"])
+            diagnostic = value.get("diagnostic", "")
+            return Result(value["status"], value["detail"], value["attempts"],
+                          diagnostic if isinstance(diagnostic, str) else "")
     return Result("结果不确定", "账号网络子进程未正常完成，可能已提交；请在 App 核对，本次不重发", None)
 
 
@@ -345,7 +386,7 @@ def _sign_one(cookie, requests_module, connect_timeout=10, read_timeout=20,
                 except (ValueError, UnicodeError, RecursionError):
                     return Result("结果不确定", "返回非有效 JSON，请在 App 核对是否已签到", attempt)
                 result = classify_response(data)
-                return Result(result.status, result.detail, attempt)
+                return Result(result.status, result.detail, attempt, result.diagnostic)
             except req.exceptions.SSLError:
                 return Result("请求失败", "TLS 证书验证失败；未关闭证书验证", attempt)
             except req.exceptions.InvalidHeader:
@@ -487,6 +528,8 @@ def run_accounts(args, failures, notices):
                     result = Result("结果不确定",
                                     f"账号处理出现未预期错误（{type(exc).__name__}），可能已提交；请在 App 核对，本次不重发")
                 notice = f"账号：{account.label}\n结果：{result.status}｜{result.detail}"
+                if result.status == "未知结果" and result.diagnostic:
+                    notice += "\n安全诊断：" + result.diagnostic
                 notices.append(notice)
                 if not result.ok:
                     failures.append(notice)
