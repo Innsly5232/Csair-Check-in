@@ -1,9 +1,48 @@
 import os
+import contextlib
+import io
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 import csair_daily_sign as m
 
 class NumberedAccounts(unittest.TestCase):
+    def test_required_accounts_block_all_legacy_fallbacks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cookies = Path(directory) / 'cookies.txt'
+            cookies.write_text('sid=synthetic', encoding='utf-8')
+            for legacy in ({}, {'CSAIR_COOKIES': 'sid=legacy'}):
+                with self.subTest(legacy=bool(legacy)), patch.dict(os.environ, {
+                        'CSAIR_REQUIRED_ACCOUNTS': '159,185,183', **legacy}, clear=True):
+                    errors = []
+                    accounts, _ = m.load_cookies(cookies, errors=errors)
+                    self.assertEqual(accounts, [])
+                    self.assertEqual(len(errors), 3)
+                    for key in m.ACCOUNT_IDS:
+                        self.assertTrue(any('CSAIR_COOKIE_' + key in e for e in errors))
+                    with self.assertRaises(ValueError):
+                        m.load_cookies(cookies, explicit=True)
+                    with patch.object(m, 'sign_one') as sign, patch.object(m, 'notify_failures') as notify, \
+                            contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        self.assertEqual(m.main(['--check']), 2)
+                        sign.assert_not_called()
+                        notify.assert_not_called()
+
+    def test_invalid_required_account_is_checked_without_numbered_variables(self):
+        with patch.dict(os.environ, {'CSAIR_REQUIRED_ACCOUNTS': 'invalid',
+                                    'CSAIR_COOKIES': 'sid=legacy'}, clear=True):
+            with self.assertRaises(ValueError):
+                m.load_cookies()
+
+    def test_legacy_file_remains_available_without_required_accounts(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
+            cookies = Path(directory) / 'cookies.txt'
+            cookies.write_text('sid=synthetic', encoding='utf-8')
+            accounts, count = m.load_cookies(cookies, explicit=True)
+            self.assertEqual([a.cookie for a in accounts], ['sid=synthetic'])
+            self.assertEqual(count, 0)
+
     def test_three_identifiers(self):
         with patch.dict(os.environ, {f'CSAIR_COOKIE_{n}': f'sid={n}' for n in m.ACCOUNT_IDS}, clear=True):
             accounts, count = m.load_cookies()

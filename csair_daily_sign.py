@@ -11,10 +11,11 @@ GitHub 使用 CSAIR_COOKIE_159 / 185 / 183，后缀即账号标识；无需备�
 独立 Secret 存在时优先读取；CSAIR_REQUIRED_ACCOUNTS 指定必需账号，空值报错。
 单个账号配置错误不阻止其他有效账号；失败统一汇总并返回非零退出码。
 以下为本地旧版兼容方式。cookies.txt：每行一个完整 Cookie，支持 Cookie: 前缀、UTF-8 BOM 和 # 注释。
-优先级：显式 --cookies > CSAIR_COOKIES 环境变量（多行）> cookies.txt。
+未设置必需账号时，旧版优先级：显式 --cookies > CSAIR_COOKIES 环境变量（多行）> cookies.txt。
+设置 CSAIR_REQUIRED_ACCOUNTS 后须使用编号变量，不允许旧版配置或 --cookies 替代。
 代码内不再保存 Cookie（已移除 CONFIG_COOKIES）；空文件不会回退到其他来源。
 接口、请求体和客户端标识沿用原版，未独立验证当前接口业务协议。
-仅明确的签到成功/已签到文字被视为完成；通用 success 不作为签到成功。
+仅完整匹配明确的签到成功/已签到短语才视为完成；通用 success 不作为签到成功。
 仅请求体肯定未发出的情况自动重试：建连超时，以及连接建立前失败（DNS 解析失败、连接被拒绝，
 凭异常链中的 urllib3 类名识别）。读超时、连接后断开、5xx 均视为结果不确定，不自动重发 POST。
 每账号在独立网络子进程中执行，默认 60 秒总时限覆盖启动、DNS、连接、重试、响应头和响应体。
@@ -104,12 +105,14 @@ class AlreadyRunning(Exception):
 def load_cookies(path=COOKIE_FILE, explicit=False, errors=None):
     """返回账号及精确重复条数；不输出凭证，也不重新排列 Cookie 字段。"""
     path = Path(path)
-    independent = not explicit and any(f"CSAIR_COOKIE_{key}" in os.environ for key in ACCOUNT_IDS)
+    required = [key.strip() for key in os.environ.get("CSAIR_REQUIRED_ACCOUNTS", "").split(",") if key.strip()]
+    if any(key not in ACCOUNT_IDS for key in required):
+        raise ValueError("CSAIR_REQUIRED_ACCOUNTS 包含不支持的账号标识")
+    if explicit and required:
+        raise ValueError("设置 CSAIR_REQUIRED_ACCOUNTS 时须使用编号账号变量，不能通过 --cookies 文件替代")
+    independent = not explicit and (bool(required) or any(f"CSAIR_COOKIE_{key}" in os.environ for key in ACCOUNT_IDS))
     if independent:
         accounts, seen, duplicates = [], {}, 0
-        required = [key.strip() for key in os.environ.get("CSAIR_REQUIRED_ACCOUNTS", "").split(",") if key.strip()]
-        if any(key not in ACCOUNT_IDS for key in required):
-            raise ValueError("CSAIR_REQUIRED_ACCOUNTS 包含不支持的账号标识")
         def report(message):
             if errors is None:
                 raise ValueError(message)
@@ -215,12 +218,11 @@ def classify_response(data):
     """保守解释原脚本使用的消息字段；未知业务码不自行猜测。"""
     if not isinstance(data, dict):
         return unknown_response(data, "JSON 顶层不是对象，需核对接口响应格式")
-    messages = [data[k].strip() for k in ("respMsg", "message")
-                if isinstance(data.get(k), str) and data[k].strip()]
     # 实际签到 HAR 的 respMsg 为通用 success，明确业务结果位于 data.result。
     nested = data.get("data")
-    if isinstance(nested, dict) and isinstance(nested.get("result"), str):
-        messages.append(nested["result"].strip())
+    messages = [obj[k].strip() for obj in (data, nested) if isinstance(obj, dict)
+                for k in ("respMsg", "message", "msg", "result")
+                if isinstance(obj.get(k), str) and obj[k].strip()]
     msg = " | ".join(messages).lower()
     if any(s in msg for s in ("未登录", "请登录", "重新登录", "登录过期", "登录失效",
                              "登录已过期", "登录已失效", "登录状态失效",
@@ -231,16 +233,21 @@ def classify_response(data):
                              "authorization failed", "session expired", "token expired")):
         return Result("Cookie 失效", "接口提示登录凭证无效，请更新 Cookie")
     # 对否定语义先行判断，防止“未成功”“unsuccessful”等假阳性。
-    if any(s in msg for s in ("失败", "未成功", "不成功", "未签到", "尚未签到",
+    if any(s in msg for s in ("失败", "未成功", "不成功", "未签到", "尚未签到", "待签到", "未完成",
                              "未签成功", "未能", "没有", "不能", "无法", "unsuccess", "not success",
-                             "fail", "error", "not signed", "not checked")):
+                             "fail", "error", "not signed", "not checked")) or re.search(r"\b(?:not|never)\b|n['’]t\b", msg):
         return Result("签到未完成", "接口消息含失败或未完成信息")
     if data.get("success") is False or (isinstance(nested, dict) and nested.get("success") is False):
         return unknown_response(data, "响应 success=false，不能确认签到完成")
-    if any(s in msg for s in ("已签到", "已签过", "已经签到", "重复签到",
-                             "今日已签", "今天已签", "already signed in", "already checked in")):
+    # 仅接受完整结果短语，避免把“昨日已签到”或“not sign-in successful”当作今日成功。
+    # 允许句末标点；其他描述保留未知结果及安全诊断，不推测业务码含义。
+    phrases = {message.lower().strip(" \t\r\n。！.!") for message in messages}
+    if phrases.intersection(("已签到", "已签过", "已经签到", "重复签到", "重复签到成功",
+                             "今日已签", "今天已签", "今日已签到", "今天已签到",
+                             "今日已经签到", "今天已经签到", "already signed in", "already checked in")):
         return Result("今日已签", "接口消息提示今日已签到")
-    if any(s in msg for s in ("签到成功", "sign-in successful", "check-in successful",
+    if phrases.intersection(("签到成功", "今日签到成功", "今天签到成功",
+                             "sign-in successful", "check-in successful",
                              "sign in successful", "check in successful")):
         return Result("签到成功", "接口消息明确提示签到成功")
     return unknown_response(data, "缺少明确的签到结果；请在南航 App 核对，未记录响应原文")
@@ -466,7 +473,7 @@ def make_logger(path):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--cookies", type=Path, help="指定 Cookie 文件；显式参数优先于环境变量")
+    parser.add_argument("--cookies", type=Path, help="指定旧版 Cookie 文件；仅限未设置 CSAIR_REQUIRED_ACCOUNTS 时使用")
     parser.add_argument("--log", type=Path, default=LOG_FILE, help="日志文件路径")
     parser.add_argument("--test-pushplus", action="store_true", help="仅发送一条固定推送测试消息，不读取 Cookie、不签到")
     parser.add_argument("--check", action="store_true", help="只校验本地 Cookie 格式，不联网，不验证有效期")

@@ -33,7 +33,7 @@ class NetworkDeadlines(unittest.TestCase):
                 hits.append(cookie)
                 try:
                     slow = mode != 'batch' or 'slow' in cookie
-                    if mode in ('fast', 'reject', '5xx', 'unknown'):
+                    if mode in ('fast', 'reject', '5xx', 'unknown', 'nested'):
                         slow = False
                     if slow and mode != 'body':
                         self.wfile.write(b'HTTP/1.1 200 OK\r\nX-Slow: ')
@@ -54,6 +54,8 @@ class NetworkDeadlines(unittest.TestCase):
                         if mode == 'unknown':
                             raw = json.dumps({'respCode': '0000', 'respMsg': 'success',
                                               'data': {'code': '00A2', 'message': 'private-response'}}).encode()
+                        if mode == 'nested':
+                            raw = json.dumps({'respMsg': 'success', 'data': {'message': '签到成功'}}).encode()
                         self.send_response(500 if mode == '5xx' else 200)
                         self.send_header('Content-Length', str(len(raw)))
                         self.end_headers()
@@ -97,6 +99,15 @@ class NetworkDeadlines(unittest.TestCase):
             result = sign.sign_one('sid=synthetic', connect_timeout=1, read_timeout=1,
                                    retries=0, ignore_proxy=True)
         self.assertEqual((result.status, result.attempts), ('签到成功', 1))
+        self.assertEqual(len(hits), 1)
+
+    def test_nested_success_survives_real_network_child(self):
+        url, hits = self.server('nested')
+        with patch.object(sign, 'SIGN_URL', url):
+            result = sign.sign_one('sid=synthetic', connect_timeout=1, read_timeout=1,
+                                   retries=2, ignore_proxy=True)
+        self.assertEqual((result.status, result.attempts), ('签到成功', 1))
+        self.assertEqual(result.diagnostic, '')
         self.assertEqual(len(hits), 1)
 
     def test_unknown_response_diagnostic_survives_real_network_child(self):

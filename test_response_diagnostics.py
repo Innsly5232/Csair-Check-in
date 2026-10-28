@@ -15,7 +15,7 @@ class ResponseDiagnostics(unittest.TestCase):
     def test_unknown_schema_reports_codes_and_missing_fields(self):
         result = sign.classify_response({
             'respCode': '0000', 'respMsg': 'success',
-            'data': {'code': '00A2', 'message': '签到成功'},
+            'data': {'code': '00A2', 'message': '业务处理中'},
         })
         self.assertEqual(result.status, '未知结果')
         self.assertFalse(result.ok)

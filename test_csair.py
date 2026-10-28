@@ -70,6 +70,38 @@ class Tests(unittest.TestCase):
         for value, expected in cases:
             with self.subTest(value=value): self.assertEqual(m.classify_response(value).status, expected)
 
+    def test_success_phrases_are_not_substring_matches(self):
+        for message in ('not sign-in successful', 'not already signed in',
+                        '昨日已签到，今日待签到', '昨日已签到',
+                        '签到成功率为0，请稍后重试', '签到成功了吗？',
+                        '如果签到成功将发放奖励', 'never already checked in'):
+            with self.subTest(message=message):
+                result = m.classify_response({'message': message})
+                self.assertFalse(result.ok)
+        for message in ('签到成功！', '今日已签到。', 'SIGN-IN SUCCESSFUL!',
+                        '今天签到成功', '已经签到'):
+            with self.subTest(message=message):
+                self.assertTrue(m.classify_response({'message': message}).ok)
+
+    def test_nested_messages_and_conflicts(self):
+        for field in ('respMsg', 'message', 'msg', 'result'):
+            for message, expected in [('签到成功', '签到成功'), ('今日已签到', '今日已签'),
+                                      ('请登录', 'Cookie 失效'), ('签到失败', '签到未完成'),
+                                      ('not already signed in', '签到未完成')]:
+                with self.subTest(field=field, message=message):
+                    data = {'respMsg': 'success', 'data': {field: message}}
+                    result, session = self.invoke([Response(data=data)])
+                    self.assertEqual(result.status, expected)
+                    self.assertEqual(session.post.call_count, 1)
+        for outer, inner in [('签到成功', '签到失败'), ('签到失败', '签到成功'),
+                             ('签到成功', 'not sign-in successful')]:
+            result = m.classify_response({'message': outer, 'data': {'message': inner}})
+            self.assertFalse(result.ok)
+        self.assertFalse(m.classify_response({
+            'success': False, 'data': {'message': '签到成功'}}).ok)
+        self.assertFalse(m.classify_response({
+            'respMsg': 'success', 'data': {'message': 'success', 'code': '00A2'}}).ok)
+
     def test_http(self):
         for status, expected in [(401,'Cookie 失效'),(403,'访问被拒绝'),(429,'请求受限'),
                                  (302,'请求失败'),(500,'结果不确定'),(400,'请求失败')]:
