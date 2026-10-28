@@ -17,7 +17,7 @@ on:
         required: true
 
 env:
-  CSAIR_REQUIRED_ACCOUNTS: "159,157,185,183"
+  CSAIR_REQUIRED_ACCOUNTS: "159,185,183"
   CSAIR_REQUIRE_PUSHPLUS: "1"
   # 仓库公开，Actions 日志任何人可见：控制台只显示账号数和各状态计数。
   CSAIR_PUBLIC_LOG: "1"
@@ -55,7 +55,6 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.check_only && !inputs.test_pushplus }}
         env:
           CSAIR_COOKIE_159: ${{ secrets.CSAIR_COOKIE_159 }}
-          CSAIR_COOKIE_157: ${{ secrets.CSAIR_COOKIE_157 }}
           CSAIR_COOKIE_185: ${{ secrets.CSAIR_COOKIE_185 }}
           CSAIR_COOKIE_183: ${{ secrets.CSAIR_COOKIE_183 }}
         run: python csair_daily_sign.py --check
@@ -64,7 +63,6 @@ jobs:
         if: ${{ github.event_name == 'schedule' || (!inputs.check_only && !inputs.test_pushplus) }}
         env:
           CSAIR_COOKIE_159: ${{ secrets.CSAIR_COOKIE_159 }}
-          CSAIR_COOKIE_157: ${{ secrets.CSAIR_COOKIE_157 }}
           CSAIR_COOKIE_185: ${{ secrets.CSAIR_COOKIE_185 }}
           CSAIR_COOKIE_183: ${{ secrets.CSAIR_COOKIE_183 }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
@@ -108,4 +106,3 @@ jobs:
           else
             echo '未生成签到结果，请检查前面步骤的错误。' >> "$GITHUB_STEP_SUMMARY"
           fi
-

@@ -7,7 +7,7 @@
 运行：python3 csair_daily_sign.py
 帮助：python3 csair_daily_sign.py --help
 
-GitHub 使用 CSAIR_COOKIE_159 / 157 / 185 / 183，后缀即账号标识；无需备注配置。
+GitHub 使用 CSAIR_COOKIE_159 / 185 / 183，后缀即账号标识；无需备注配置。
 独立 Secret 存在时优先读取；CSAIR_REQUIRED_ACCOUNTS 指定必需账号，空值报错。
 单个账号配置错误不阻止其他有效账号；失败统一汇总并返回非零退出码。
 以下为本地旧版兼容方式。cookies.txt：每行一个完整 Cookie，支持 Cookie: 前缀、UTF-8 BOM 和 # 注释。
@@ -55,7 +55,7 @@ from pushplus import NoRedirect  # noqa: F401  # 保留旧名称，测试和外�
 BASE_DIR = Path(__file__).resolve().parent
 COOKIE_FILE = BASE_DIR / "cookies.txt"
 LOG_FILE = BASE_DIR / "sign_log.txt"
-ACCOUNT_IDS = ("159", "157", "185", "183")
+ACCOUNT_IDS = ("159", "185", "183")
 SLEEP_MIN, SLEEP_MAX = 3, 8
 MAX_RETRY = 2
 ACCOUNT_TIME_BUDGET = 30  # 总时限 = connect_timeout + read_timeout + 此额外预算（默认共 60 秒）
@@ -134,7 +134,7 @@ def load_cookies(path=COOKIE_FILE, explicit=False, errors=None):
             seen[cookie] = key
             accounts.append(Account(key, cookie))
         if not accounts and not errors:
-            raise ValueError("未配置账号：请至少填写一个 CSAIR_COOKIE_159 / 157 / 185 / 183 Secret")
+            raise ValueError("未配置账号：请至少填写一个 CSAIR_COOKIE_159 / 185 / 183 Secret")
         return accounts, duplicates
     if explicit:
         lines = path.read_text(encoding="utf-8-sig").splitlines()
@@ -224,8 +224,11 @@ def classify_response(data):
     msg = " | ".join(messages).lower()
     if any(s in msg for s in ("未登录", "请登录", "重新登录", "登录过期", "登录失效",
                              "登录已过期", "登录已失效", "登录状态失效",
-                             "cookie过期", "cookie失效", "not logged in", "login required",
-                             "session expired", "token expired")):
+                             "登录信息失败", "登录失败", "认证失败", "鉴权失败", "用户认证失败",
+                             "用户信息校验失败", "会话失效", "会话过期", "token失效", "token过期",
+                             "凭证失效", "凭证过期", "cookie过期", "cookie失效",
+                             "not logged in", "login required", "login failed", "authentication failed",
+                             "authorization failed", "session expired", "token expired")):
         return Result("Cookie 失效", "接口提示登录凭证无效，请更新 Cookie")
     # 对否定语义先行判断，防止“未成功”“unsuccessful”等假阳性。
     if any(s in msg for s in ("失败", "未成功", "不成功", "未签到", "尚未签到",
@@ -587,4 +590,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     sys.exit(main())
-

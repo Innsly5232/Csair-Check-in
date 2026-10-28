@@ -4,7 +4,7 @@ from unittest.mock import patch
 import csair_daily_sign as m
 
 class NumberedAccounts(unittest.TestCase):
-    def test_four_identifiers(self):
+    def test_three_identifiers(self):
         with patch.dict(os.environ, {f'CSAIR_COOKIE_{n}': f'sid={n}' for n in m.ACCOUNT_IDS}, clear=True):
             accounts, count = m.load_cookies()
         self.assertEqual([a.label for a in accounts], list(m.ACCOUNT_IDS))
@@ -12,10 +12,10 @@ class NumberedAccounts(unittest.TestCase):
         self.assertEqual(count, 0)
 
     def test_partial_and_legacy_ignored(self):
-        with patch.dict(os.environ, {'CSAIR_COOKIE_159':'', 'CSAIR_COOKIE_157':'sid=new',
+        with patch.dict(os.environ, {'CSAIR_COOKIE_159':'', 'CSAIR_COOKIE_185':'sid=new',
                                     'CSAIR_COOKIES':'sid=old', 'CSAIR_ACCOUNT_NAMES':'wrong'}, clear=True):
             accounts, _ = m.load_cookies()
-        self.assertEqual(accounts, [m.Account('157', 'sid=new')])
+        self.assertEqual(accounts, [m.Account('185', 'sid=new')])
 
     def test_empty_never_falls_back(self):
         with patch.dict(os.environ, {'CSAIR_COOKIE_159':'', 'CSAIR_COOKIES':'sid=old'}, clear=True):
@@ -29,7 +29,7 @@ class NumberedAccounts(unittest.TestCase):
                 self.assertNotIn(bad, str(error.exception))
 
     def test_duplicate_keeps_first_identifier(self):
-        with patch.dict(os.environ, {'CSAIR_COOKIE_159':'sid=same', 'CSAIR_COOKIE_157':'sid=same',
+        with patch.dict(os.environ, {'CSAIR_COOKIE_159':'sid=same', 'CSAIR_COOKIE_185':'sid=same',
                                     'CSAIR_COOKIE_183':'Cookie: sid=other'}, clear=True):
             accounts, count = m.load_cookies()
         self.assertEqual([a.label for a in accounts], ['159','183'])

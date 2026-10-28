@@ -12,16 +12,15 @@
 | Secret 名称 | Secret 内容 |
 | --- | --- |
 | `CSAIR_COOKIE_159` | 159 账号的完整 Cookie |
-| `CSAIR_COOKIE_157` | 157 账号的完整 Cookie |
 | `CSAIR_COOKIE_185` | 185 账号的完整 Cookie |
 | `CSAIR_COOKIE_183` | 183 账号的完整 Cookie |
 | `PUSHPLUS_TOKEN` | PushPlus 个人 Token，已绑定新消息ClawBot（cmcc）渠道 |
 
 每个 Cookie Secret 只填该账号的一条完整 Cookie，不填账号名、不加引号、不放多个账号。无需 Cookie 文件，也无需 `CSAIR_ACCOUNT_NAMES` 或 `CSAIR_COOKIES`；这两个旧 Secret 不再被 GitHub 工作流读取，可以删除。
 
-工作流要求 159、157、185、183 四个账号都必须配置。任何账号缺少 Cookie、格式错误或重复，都会显示账号标识、发送提醒并让任务报错，其他有效账号会继续签到。183 未配置也会明确提醒，不会静默跳过。相同 Cookie 只提交一次。
+工作流要求 159、185、183 三个账号都必须配置。任何账号缺少 Cookie、格式错误或重复，都会显示账号标识、发送提醒并让任务报错，其他有效账号会继续签到。183 未配置也会明确提醒，不会静默跳过。相同 Cookie 只提交一次。
 
-例如 157 账号失效，通知显示“账号：157；原因：Cookie 失效”，只需更新 `CSAIR_COOKIE_157`。
+例如 185 账号失效，通知显示“账号：185；原因：Cookie 失效”，只需更新 `CSAIR_COOKIE_185`。
 
 ## 运行
 
@@ -48,7 +47,7 @@ Actions → 南航每日签到 → Run workflow。默认勾选 `check_only`，�
 - 工作流只读仓库权限，凭证只注入必要步骤，签到任务串行执行。
 - 第三方 Actions 固定到 commit SHA（注释标注对应版本），并由 Dependabot 每周检查 Actions 和 pip 更新。
 - 使用 Python 3.12 和固定版本 Requests；运行测试：`python -m unittest discover -v`。
-- 脚本保留旧版本地文件/环境变量用法用于兼容，但当前 GitHub 工作流仅使用四个独立 Secret。代码里不再保存 Cookie（已移除 `CONFIG_COOKIES`）。
+- 脚本保留旧版本地文件/环境变量用法用于兼容，但当前 GitHub 工作流仅使用三个独立 Secret。代码里不再保存 Cookie（已移除 `CONFIG_COOKIES`）。
 
 PushPlus 接口文档：https://www.pushplus.plus/doc/guide/api.html
 
@@ -99,4 +98,3 @@ GitHub 的 60 天无活动自动停用规则适用于公开仓库。“重新启
 每次真实签到结束后，成功、今日已签和失败都发送一条 CMCC 汇总通知；失败保留原因。通知提交失败时，已成功的签到不会重新提交，但整个工作流会标记失败。仅检查模式不通知。
 
 Cookie 仍需手动更新。现有 HAR 能看到设备相关的 token 登录请求，但未验证它能在旧 Cookie 过期后换取新登录凭证，不会把这类请求直接重放当作自动续期。每天请求是否会延长服务端会话也无法保证。失效后会标明账号并提醒更新相应 Secret。
-

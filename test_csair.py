@@ -56,6 +56,11 @@ class Tests(unittest.TestCase):
                  ({'message':'签到成功，但后续处理 error'}, '签到未完成'),
                  ({'message':'unsuccessful'}, '签到未完成'),
                  ({'message':'登录已过期'}, 'Cookie 失效'),
+                 ({'message':'登录信息失败'}, 'Cookie 失效'),
+                 ({'message':'认证失败'}, 'Cookie 失效'),
+                 ({'message':'鉴权失败'}, 'Cookie 失效'),
+                 ({'message':'用户信息校验失败'}, 'Cookie 失效'),
+                 ({'message':'authentication failed'}, 'Cookie 失效'),
                  ({'message':'success'}, '未知结果'),
                  ({'message':'成功'}, '未知结果'),
                  ({'success':False,'message':'签到成功'}, '未知结果'),
@@ -299,4 +304,3 @@ class Tests(unittest.TestCase):
             self.assertEqual(exc.exception.code,2)
 
 if __name__ == '__main__': unittest.main(verbosity=2)
-

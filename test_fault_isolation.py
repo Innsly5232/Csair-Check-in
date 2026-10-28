@@ -20,40 +20,39 @@ class FaultIsolation(unittest.TestCase):
             return code, sign.call_count, notify.call_args.args[0] if notify.called else []
 
     def test_bad_cookie_does_not_block_other_accounts(self):
-        code, calls, errors = self.run_batch({'CSAIR_COOKIE_159':'sid=valid', 'CSAIR_COOKIE_157':'invalid', 'CSAIR_COOKIE_185':'sid=valid2'}, [m.Result('签到成功','ok')]*2)
+        code, calls, errors = self.run_batch({'CSAIR_COOKIE_159':'sid=valid', 'CSAIR_COOKIE_185':'invalid', 'CSAIR_COOKIE_183':'sid=valid2'}, [m.Result('签到成功','ok')]*2)
         self.assertEqual((code, calls), (1,2))
-        self.assertIn('157', '\n'.join(errors))
+        self.assertIn('185', '\n'.join(errors))
         self.assertNotIn('invalid', '\n'.join(errors))
 
-    def test_required_missing_and_optional_absent(self):
-        code, calls, errors = self.run_batch({'CSAIR_REQUIRED_ACCOUNTS':'159,157,185', 'CSAIR_COOKIE_159':'sid=valid', 'CSAIR_COOKIE_185':'sid=valid2'}, [m.Result('签到成功','ok')]*2)
+    def test_required_missing_account_does_not_block_configured_accounts(self):
+        code, calls, errors = self.run_batch({'CSAIR_REQUIRED_ACCOUNTS':'159,185,183', 'CSAIR_COOKIE_159':'sid=valid', 'CSAIR_COOKIE_185':'sid=valid2'}, [m.Result('签到成功','ok')]*2)
         self.assertEqual((code, calls), (1,2))
-        self.assertIn('157', '\n'.join(errors))
-        self.assertNotIn('183', '\n'.join(errors))
+        self.assertIn('183', '\n'.join(errors))
 
-    def test_workflow_requires_183_and_missing_183_notifies_without_blocking_others(self):
+    def test_workflow_requires_all_three_and_missing_183_notifies_without_blocking_others(self):
         workflow = (Path(__file__).parent / '.github/workflows/csair-sign.yml').read_text(encoding='utf-8')
         import re
         required = re.search(r'CSAIR_REQUIRED_ACCOUNTS: "([^"]+)"', workflow).group(1)
-        self.assertEqual(set(required.split(',')), {'159', '157', '185', '183'})
+        self.assertEqual(set(required.split(',')), {'159', '185', '183'})
         code, calls, errors = self.run_batch({
             'CSAIR_REQUIRED_ACCOUNTS': required,
-            'CSAIR_COOKIE_159': 'sid=a', 'CSAIR_COOKIE_157': 'sid=b',
-            'CSAIR_COOKIE_185': 'sid=c', 'CSAIR_COOKIE_183': ''}, [m.Result('签到成功', 'ok')] * 3)
-        self.assertEqual((code, calls), (1, 3))
+            'CSAIR_COOKIE_159': 'sid=a', 'CSAIR_COOKIE_185': 'sid=b',
+            'CSAIR_COOKIE_183': ''}, [m.Result('签到成功', 'ok')] * 2)
+        self.assertEqual((code, calls), (1, 2))
         self.assertIn('CSAIR_COOKIE_183 未配置或为空', '\n'.join(errors))
 
     def test_unexpected_account_error_continues_without_retry(self):
-        code, calls, errors = self.run_batch({'CSAIR_COOKIE_159':'sid=a', 'CSAIR_COOKIE_157':'sid=b'}, [RuntimeError('sid=a'),m.Result('签到成功','ok')])
+        code, calls, errors = self.run_batch({'CSAIR_COOKIE_159':'sid=a', 'CSAIR_COOKIE_185':'sid=b'}, [RuntimeError('sid=a'),m.Result('签到成功','ok')])
         self.assertEqual((code,calls),(1,2))
         self.assertIn('159', '\n'.join(errors))
         self.assertNotIn('sid=a', '\n'.join(errors))
 
     def test_duplicate_reports_both_identifiers_and_submits_once(self):
-        code, calls, errors = self.run_batch({'CSAIR_COOKIE_159':'sid=a','CSAIR_COOKIE_157':'sid=a'}, [m.Result('今日已签','ok')])
+        code, calls, errors = self.run_batch({'CSAIR_COOKIE_159':'sid=a','CSAIR_COOKIE_185':'sid=a'}, [m.Result('今日已签','ok')])
         self.assertEqual((code,calls),(1,1))
         self.assertIn('159', '\n'.join(errors))
-        self.assertIn('157', '\n'.join(errors))
+        self.assertIn('185', '\n'.join(errors))
 
     def test_missing_push_token_cannot_report_green(self):
         code, calls, errors = self.run_batch({'CSAIR_COOKIE_159':'sid=a','CSAIR_REQUIRE_PUSHPLUS':'1'}, [m.Result('今日已签','ok')])
@@ -100,4 +99,3 @@ class FaultIsolation(unittest.TestCase):
             self.assertIn('159',content)
             self.assertIn('183',content)
             self.assertIn('今日已签',content)
-
