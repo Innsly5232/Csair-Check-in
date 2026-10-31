@@ -11,7 +11,7 @@ on:
         default: true
         required: true
       test_pushplus:
-        description: '仅测试 CMCC 新消息ClawBot 推送（不签到，优先于仅检查）'
+        description: '仅测试通知通道（不签到，优先于仅检查）'
         type: boolean
         default: false
         required: true
@@ -45,11 +45,13 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: 快速语法检查
         # 完整回归由 push / pull_request 的 test.yml 执行，避免计时测试偶发失败挡住每日签到。
-        run: python -m py_compile csair_daily_sign.py pushplus.py network_worker.py
-      - name: 仅测试 PushPlus
+        run: python -m py_compile csair_daily_sign.py pushplus.py hermes_notify.py network_worker.py
+      - name: 仅测试通知通道
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_pushplus }}
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          HERMES_WEBHOOK_SECRET: ${{ secrets.HERMES_WEBHOOK_SECRET }}
+          HERMES_WEBHOOK_SSH_KEY: ${{ secrets.HERMES_WEBHOOK_SSH_KEY }}
         run: python csair_daily_sign.py --test-pushplus
       - name: 仅检查配置（不联网、不推送）
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.check_only && !inputs.test_pushplus }}
@@ -66,6 +68,8 @@ jobs:
           CSAIR_COOKIE_185: ${{ secrets.CSAIR_COOKIE_185 }}
           CSAIR_COOKIE_183: ${{ secrets.CSAIR_COOKIE_183 }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          HERMES_WEBHOOK_SECRET: ${{ secrets.HERMES_WEBHOOK_SECRET }}
+          HERMES_WEBHOOK_SSH_KEY: ${{ secrets.HERMES_WEBHOOK_SSH_KEY }}
         run: |
           # 8 分钟上限远低于 15 分钟的 job 超时，超时后仍有时间发提醒。
           code=0
@@ -79,12 +83,16 @@ jobs:
         if: ${{ failure() && steps.sign.outcome == 'skipped' && (github.event_name == 'schedule' || (!inputs.check_only && !inputs.test_pushplus)) }}
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          HERMES_WEBHOOK_SECRET: ${{ secrets.HERMES_WEBHOOK_SECRET }}
+          HERMES_WEBHOOK_SSH_KEY: ${{ secrets.HERMES_WEBHOOK_SSH_KEY }}
         # 只依赖独立的标准库脚本和系统 python3，主脚本或 setup-python 出问题时也能发出。
         run: python3 pushplus.py '签到未开始：依赖安装、Python 初始化或基础检查失败，请查看 Actions 步骤日志。'
       - name: 取消或超时提醒
         if: ${{ cancelled() && (github.event_name == 'schedule' || (!inputs.check_only && !inputs.test_pushplus)) }}
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          HERMES_WEBHOOK_SECRET: ${{ secrets.HERMES_WEBHOOK_SECRET }}
+          HERMES_WEBHOOK_SSH_KEY: ${{ secrets.HERMES_WEBHOOK_SSH_KEY }}
         # 尽力而为：若在签到过程中被取消，主脚本也会自行发一条中断提醒，可能收到两条。
         run: python3 pushplus.py '签到任务被取消或整体超时，签到状态未知，请在南航 App 核对。' || true
       - name: 写入运行摘要
@@ -94,12 +102,12 @@ jobs:
           CHECK_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.check_only && !inputs.test_pushplus }}
         run: |
           if [ "$TEST_PUSHPLUS" = 'true' ]; then
-            echo '本次仅测试推送，未提交签到。结果请查看“仅测试 PushPlus”步骤。' >> "$GITHUB_STEP_SUMMARY"
+            echo '本次仅测试推送，未提交签到。结果请查看“仅测试通知通道”步骤。' >> "$GITHUB_STEP_SUMMARY"
           elif [ "$CHECK_ONLY" = 'true' ]; then
             echo '本次为仅检查模式，不提交签到；检查结果请查看步骤日志。' >> "$GITHUB_STEP_SUMMARY"
           elif [ -f sign_log.txt ]; then
-            # 仓库公开：摘要只写统计行，不含逐账号结果；明细见 PushPlus 通知。
-            echo '### 签到结果（仅统计，明细见 PushPlus 通知）' >> "$GITHUB_STEP_SUMMARY"
+            # 仓库公开：摘要只写统计行，不含逐账号结果；明细见通知通道。
+            echo '### 签到结果（仅统计，明细见通知通道）' >> "$GITHUB_STEP_SUMMARY"
             echo '```text' >> "$GITHUB_STEP_SUMMARY"
             grep -E '=====|汇总：' sign_log.txt >> "$GITHUB_STEP_SUMMARY" || true
             echo '```' >> "$GITHUB_STEP_SUMMARY"

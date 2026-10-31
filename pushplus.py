@@ -104,6 +104,18 @@ def send(lines, title=DEFAULT_TITLE, retries=NOTIFY_RETRIES, sleep=None):
     sleep = sleep or time.sleep  # 调用时再取，便于测试替换
     if not lines:
         return True
+    if os.environ.get("HERMES_WEBHOOK_SECRET"):
+        try:
+            import hermes_notify
+            content = "时间：" + dt.datetime.now(CHINA_TZ).strftime("%Y-%m-%d %H:%M:%S +0800")
+            content += "\n\n" + "\n\n".join(lines)
+            content += "\n\nCookie 失效请更新对应账号的 CSAIR_COOKIE_数字 Secret；结果不确定请先在南航 App 核对。"
+            hermes_notify.send(title, content, route="github-csair")
+            print("Hermes 已确认微信通知投递。")
+            return True
+        except Exception:
+            print("Hermes 微信通知未确认；请检查 Actions 状态。", file=sys.stderr)
+            return False
     token = os.environ.get("PUSHPLUS_TOKEN", "").strip()
     if not token:
         print("PushPlus 未配置：请添加 PUSHPLUS_TOKEN Secret，失败通知未发送。", file=sys.stderr)
@@ -148,4 +160,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     sys.exit(main())
-

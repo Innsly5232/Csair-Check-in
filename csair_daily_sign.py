@@ -513,8 +513,9 @@ def run_accounts(args, failures, notices):
                 return 2
             print(f"本地格式检查通过：{len(accounts)} 个账号，移除 {duplicates} 条精确重复项。未联网验证 Cookie。")
             return 0
-        if os.environ.get("CSAIR_REQUIRE_PUSHPLUS") == "1" and not os.environ.get("PUSHPLUS_TOKEN", "").strip():
-            failures.append("推送配置错误：PUSHPLUS_TOKEN 未设置或为空，无法发送失败提醒")
+        if os.environ.get("CSAIR_REQUIRE_PUSHPLUS") == "1" and not (
+                os.environ.get("HERMES_WEBHOOK_SECRET") or os.environ.get("PUSHPLUS_TOKEN", "").strip()):
+            failures.append("推送配置错误：Hermes Webhook 与 PushPlus 均未配置，无法发送失败提醒")
             print(failures[-1], file=sys.stderr)
         if not accounts:
             return 2
@@ -582,7 +583,7 @@ def main(argv=None):
     args = parse_args(argv)
     if args.test_pushplus:
         return 0 if notify_failures(["这是一条主动推送测试消息，本次没有提交签到。"],
-                                    title="南航 PushPlus 推送测试") else 1
+                                    title="南航通知通道测试") else 1
     failures, notices = [], []
     code = run_accounts(args, failures, notices)
     if not args.check and (notices or failures):

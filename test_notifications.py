@@ -19,6 +19,13 @@ class Notifications(unittest.TestCase):
         transport.start()
         self.addCleanup(transport.stop)
 
+    def test_hermes_route_takes_priority_without_pushplus_token(self):
+        with patch.dict(os.environ, {'HERMES_WEBHOOK_SECRET': 'test-secret'}), \
+                patch('hermes_notify.send') as deliver:
+            self.assertTrue(m.notify_failures(['账号：家人；结果：已签'], '南航签到完成'))
+        self.assertEqual(deliver.call_args.kwargs['route'], 'github-csair')
+        self.assertIn('账号：家人', deliver.call_args.args[1])
+
     def test_names_follow_original_lines_and_duplicates(self):
         with patch.dict(os.environ, {'CSAIR_COOKIES': 'sid=a\nsid=a\nsid=b',
                                     'CSAIR_ACCOUNT_NAMES': '本人\n重复\n家人'}):
@@ -135,4 +142,3 @@ class Notifications(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
